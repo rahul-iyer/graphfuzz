@@ -124,7 +124,7 @@ fn run_grammar(
     let started = Instant::now();
     let grammar = Grammar::load(&settings.file)?;
     let start = settings.start.clone().unwrap_or_else(|| grammar.order[0].clone());
-    let deriver = Deriver::new(&grammar, &start, &settings.separator, &settings.vocabulary, &settings.prefer);
+    let deriver = Deriver::new(&grammar, &start, &settings.separator, &settings.vocabulary, &settings.prefer, &settings.typing);
     let mut targets = deriver.targets(settings.coverage);
     if settings.limit > 0 {
         targets.truncate(settings.limit);

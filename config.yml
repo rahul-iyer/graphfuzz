@@ -138,9 +138,58 @@ grammars:
       unsignedLiteral: 0
       unsignedNumericLiteral: 0
       exactNumericLiteral: 4            # an unsigned integer
+      isOrColon: 1                      # n:Person, not n IS Person
+      elementPattern: 0                 # a node, not an edge on its own
+    # Typed values: where a sentence does not try a choice inside an expression, the expression is a value of the
+    # type its context wants. `graphfuzz sentences --grammar gql --rule R` lists a rule's alternatives and elements.
+    typing:
+      value_rules: [valueExpression, valueExpressionPrimary, nonParenthesizedValueExpressionPrimary, numericValueExpression, characterStringValueExpression, booleanValueExpression, aggregatingValueExpression]
+      types:
+        searchCondition: BOOL
+        booleanValueExpression: BOOL
+        numericValueExpression: INT64
+        characterStringValueExpression: STRING
+        valueExpression#signedExprAlt: INT64
+        valueExpression#multDivExprAlt: INT64
+        valueExpression#addSubtractExprAlt: INT64
+        valueExpression#concatenationExprAlt: STRING
+        valueExpression#comparisonExprAlt: SAME
+        valueExpression#predicateExprAlt: ANY
+        valueExpression#normalizedPredicateExprAlt: STRING
+        valueExpression#notExprAlt: BOOL
+        valueExpression#isNotExprAlt: BOOL
+        valueExpression#conjunctiveExprAlt: BOOL
+        valueExpression#disjunctiveExprAlt: BOOL
+        absoluteValueExpression: INT64
+        modulusExpression: INT64
+        generalSetFunction: INT64
+        charLengthExpression: STRING
+        foldCharacterString: STRING
+        trimSingleCharacterOrByteString: STRING
+        trimMultiCharacterCharacterString: STRING
+        normalizeCharacterString: STRING
+        subCharacterOrByteString: STRING
+        trigonometricFunction: FLOAT64
+        generalLogarithmFunction: FLOAT64
+        commonLogarithm: FLOAT64
+        naturalLogarithm: FLOAT64
+        exponentialFunction: FLOAT64
+        powerFunction: FLOAT64
+        squareRoot: FLOAT64
+        floorFunction: FLOAT64
+        ceilingFunction: FLOAT64
+      values:
+        INT64: [n.age, "1"]
+        FLOAT64: [n.score, "1.5E0"]
+        STRING: [n.name, "'Ada'"]
+        BOOL: [n.active, "TRUE"]
+        DATE: [n.born, "DATE '2021-03-04'"]
+      # Start from MATCH (n:Person), so the values have their n.
+      present: ["ambientLinearQueryStatement#0.0", "elementPatternFiller#0.0", "elementPatternFiller#0.1"]
     vocabulary:
-      bindingVariable: [n, m, e, p]
-      labelName: [Person, City, KNOWS, LIVES_IN]
+      # Element patterns alternate node and edge, so their names do: (n:Person)-[e:KNOWS]->(n:Person).
+      bindingVariable: [n, e]
+      labelName: [Person, KNOWS]
       propertyName: [id, name, age, since]
       fieldName: [id, name]
       graphName: [fuzz]
@@ -171,10 +220,32 @@ grammars:
     engines: [neo4j, ladybug]
     prefer:
       oC_SinglePartQuery: 0             # RETURN, not DELETE, when nothing forces a clause
+    typing:
+      value_rules: [oC_Expression, oC_OrExpression, oC_XorExpression, oC_AndExpression, oC_NotExpression, oC_ComparisonExpression, oC_StringListNullPredicateExpression, oC_AddOrSubtractExpression, oC_MultiplyDivideModuloExpression, oC_PowerOfExpression, oC_UnaryAddOrSubtractExpression, oC_NonArithmeticOperatorExpression, oC_Atom]
+      types:
+        oC_Where: BOOL
+        oC_OrExpression#0: BOOL
+        oC_XorExpression#0: BOOL
+        oC_AndExpression#0: BOOL
+        oC_NotExpression#0: BOOL
+        oC_ComparisonExpression#0: SAME
+        oC_StringListNullPredicateExpression#0: STRING
+        oC_AddOrSubtractExpression#0: INT64
+        oC_MultiplyDivideModuloExpression#0: INT64
+        oC_PowerOfExpression#0: FLOAT64
+        oC_UnaryAddOrSubtractExpression#1: INT64
+      values:
+        INT64: [n.age, "1"]
+        FLOAT64: [n.score, "1.5"]
+        STRING: [n.name, "'Ada'"]
+        BOOL: [n.active, "true"]
+        DATE: [n.born, "date('2021-03-04')"]
+      # Start from MATCH (n:Person), so the values have their n.
+      present: ["oC_SinglePartQuery__14#0.0", "oC_NodePattern#0.2", "oC_NodePattern#0.3"]
     vocabulary:
       SP: [" "]
-      oC_Variable: [n, m, e, p]
-      oC_LabelName: [Person, City]
+      oC_Variable: [n, m]
+      oC_LabelName: [Person]
       oC_RelTypeName: [KNOWS, LIVES_IN]
       oC_PropertyKeyName: [id, name, age, since]
       oC_FunctionName: [abs, toUpper, size, coalesce]

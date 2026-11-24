@@ -143,6 +143,9 @@ pub struct GrammarConfig {
     /// The alternative (by index, from 0) a rule takes when nothing forces a choice; the cheapest otherwise.
     #[serde(default)]
     pub prefer: BTreeMap<String, usize>,
+    /// What makes sentences well typed; see `graphfuzz sentences --rule` for rule and element numbers.
+    #[serde(default)]
+    pub typing: crate::derive::Typing,
     /// The most sentences to run; 0 runs one for every target.
     #[serde(default)]
     pub limit: usize,

@@ -55,6 +55,13 @@ A grammar in `config.yml` names its file, start rule, engines, a vocabulary (fix
 strings in place of derived identifiers and literals), and `prefer`, the alternatives to take when no choice
 is forced, so sentences start from `MATCH ... RETURN` rather than the shortest statement.
 
+A grammar's `typing` makes its sentences well typed. `value_rules` are rules that stand for one value; where a
+sentence tries no choice inside one, it gets a value of the type its context wants instead of the rule's
+shortest derivation. `types` give that type below a rule or an alternative (`SAME` for one type shared by
+comparison operands), `values` list values of each type (fixture properties and literals, in turn), and
+`present` includes optional elements by default, so sentences start from `MATCH (n:Person)`.
+`graphfuzz sentences --grammar G --rule R` lists a rule's alternatives and elements as these keys number them.
+
 ```sh
 ./target/release/graphfuzz sentences --config config.yml --grammar gql --count 30   # targets and sentences
 ./target/release/graphfuzz grammar --config config.yml                              # grammar.md, grammar.jsonl

@@ -95,6 +95,9 @@ enum Command {
         grammar: String,
         #[arg(long, default_value_t = 20)]
         count: usize,
+        /// Instead, list this rule's alternatives and elements, as `present` and `types` number them.
+        #[arg(long)]
+        rule: Option<String>,
     },
     #[command(hide = true)]
     Worker {
@@ -146,12 +149,16 @@ fn main() -> Result<()> {
             let mut slots = connect_all(&file, &config, &schema)?;
             grammar_run::run_grammars(&file, &mut slots, &schema, &file.out)
         }
-        Command::Sentences { config, grammar, count } => {
+        Command::Sentences { config, grammar, count, rule } => {
             let file = FileConfig::load(Some(&config))?;
             let Some(settings) = file.grammars.get(&grammar) else { bail!("no grammar named {grammar} in the configuration") };
             let parsed = g4::Grammar::load(&settings.file)?;
             let start = settings.start.clone().unwrap_or_else(|| parsed.order[0].clone());
-            let deriver = derive::Deriver::new(&parsed, &start, &settings.separator, &settings.vocabulary, &settings.prefer);
+            let deriver = derive::Deriver::new(&parsed, &start, &settings.separator, &settings.vocabulary, &settings.prefer, &settings.typing);
+            if let Some(rule) = &rule {
+                print!("{}", deriver.describe_rule(rule));
+                return Ok(());
+            }
             let targets = deriver.targets(settings.coverage);
             let parser_rules = parsed.rules.values().filter(|rule| !rule.lexer).count();
             let reachable = parsed.rules.keys().filter(|name| !parsed.rules[*name].lexer && deriver.reachable(name)).count();

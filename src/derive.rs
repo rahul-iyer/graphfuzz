@@ -85,6 +85,27 @@ pub struct Sentence {
     pub covered: BTreeSet<Target>,
 }
 
+/// What a grammar's sentences need to be well typed: which rules stand for one value, what type a context
+/// wants, and values of each type.
+#[derive(serde::Deserialize, Debug, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Typing {
+    /// Rules that stand for one value. Where a sentence does not try a choice inside one, it gets a value of the
+    /// type its context wants instead of the rule's shortest derivation.
+    #[serde(default)]
+    pub value_rules: Vec<String>,
+    /// The type values take below a rule (`rule`) or below an alternative taken (`rule#label` or `rule#index`).
+    /// `SAME` gives the values below it one type, chosen per use; `ANY` lets them take any type.
+    #[serde(default)]
+    pub types: BTreeMap<String, String>,
+    /// Values of each type, used in turn.
+    #[serde(default)]
+    pub values: BTreeMap<String, Vec<String>>,
+    /// Optional elements present unless a choice says otherwise, as `rule#alt.element`.
+    #[serde(default)]
+    pub present: Vec<String>,
+}
+
 pub struct Deriver<'g> {
     grammar: &'g Grammar,
     start: String,
@@ -93,6 +114,9 @@ pub struct Deriver<'g> {
     vocabulary: &'g BTreeMap<String, Vec<String>>,
     /// Alternatives to take when nothing forces a choice, so sentences start from a statement that runs.
     prefer: &'g BTreeMap<String, usize>,
+    typing: &'g Typing,
+    /// Optional elements present by default: rule, alternative, element.
+    present: BTreeSet<(String, usize, usize)>,
     cost: HashMap<String, u64>,
     /// The cheapest way into each parser rule: the rule, alternative, and element that uses it.
     via: HashMap<String, (String, usize, usize)>,
@@ -106,13 +130,25 @@ impl<'g> Deriver<'g> {
         separator: &str,
         vocabulary: &'g BTreeMap<String, Vec<String>>,
         prefer: &'g BTreeMap<String, usize>,
+        typing: &'g Typing,
     ) -> Deriver<'g> {
+        let present = typing
+            .present
+            .iter()
+            .filter_map(|entry| {
+                let (rule, position) = entry.split_once('#')?;
+                let (alt, element) = position.split_once('.')?;
+                Some((rule.to_string(), alt.parse().ok()?, element.parse().ok()?))
+            })
+            .collect();
         let mut deriver = Deriver {
             grammar,
             start: start.to_string(),
             separator: separator.to_string(),
             vocabulary,
             prefer,
+            typing,
+            present,
             cost: HashMap::new(),
             via: HashMap::new(),
             lexer_text: HashMap::new(),
@@ -313,7 +349,8 @@ impl<'g> Deriver<'g> {
         let mut tokens = Vec::new();
         let mut covered = BTreeSet::new();
         let mut occurrences: HashMap<String, usize> = HashMap::new();
-        self.expand(&self.start.clone(), &plan, &mut tokens, &mut covered, &mut occurrences, 0);
+        let mut state = Typed { context: None, uses: HashMap::new(), same: 0 };
+        self.expand(&self.start.clone(), &plan, &mut tokens, &mut covered, &mut occurrences, 0, &mut state);
         Sentence { text: self.join(&tokens).trim().to_string(), target: target.clone(), covered }
     }
 
@@ -326,6 +363,7 @@ impl<'g> Deriver<'g> {
         covered: &mut BTreeSet<Target>,
         occurrences: &mut HashMap<String, usize>,
         depth: usize,
+        state: &mut Typed,
     ) -> Option<usize> {
         if let Some(values) = self.vocabulary.get(rule) {
             // Each occurrence takes the next value, so names repeat the way variables and their uses do.
@@ -339,6 +377,18 @@ impl<'g> Deriver<'g> {
             tokens.push(self.token_text(rule));
             return None;
         }
+        let forced = plan.first().is_some_and(|step| step.rule == rule);
+        // A value nothing here is trying a choice in: a value of the type the context wants.
+        if !forced && self.typing.value_rules.iter().any(|name| name == rule) {
+            let ty = self.typing.types.get(rule).cloned().or_else(|| state.context.clone()).unwrap_or_else(|| "INT64".to_string());
+            let ty = state.resolve(&ty, &self.typing);
+            if let Some(values) = self.typing.values.get(&ty) {
+                let used = state.uses.entry(ty.clone()).or_default();
+                tokens.push(values[*used % values.len()].clone());
+                *used += 1;
+                return None;
+            }
+        }
         let (alt, step) = match plan.first() {
             Some(step) if step.rule == rule => (step.alt, Some(step)),
             // Deep down, a preferred alternative could recurse forever; the cheapest one cannot.
@@ -346,6 +396,27 @@ impl<'g> Deriver<'g> {
             _ => (self.default_alt(rule), None),
         };
         covered.insert(Target::Alt { rule: rule.to_string(), alt });
+        // The type below this alternative: its own, its rule's, or the context's.
+        let label = definition.alts[alt].label.clone().unwrap_or_default();
+        let outer = state.context.clone();
+        let declared = self
+            .typing
+            .types
+            .get(&format!("{rule}#{label}"))
+            .or_else(|| self.typing.types.get(&format!("{rule}#{alt}")))
+            .or_else(|| self.typing.types.get(rule))
+            .cloned();
+        // An alternative such as `A (OR A)*` passes a value through when it repeats nothing, and then its type
+        // does not apply.
+        let elements = &definition.alts[alt].elements;
+        let optional = elements.iter().enumerate().filter(|(_, element)| element.suffix != Suffix::One).map(|(index, _)| index).collect::<Vec<_>>();
+        let operator_used = optional.is_empty()
+            || optional.iter().any(|index| {
+                step.is_some_and(|step| step.element == Some(*index) && step.count > 0) || self.present.contains(&(rule.to_string(), alt, *index))
+            });
+        if let (Some(declared), true) = (declared, operator_used) {
+            state.context = Some(state.resolve(&declared, &self.typing));
+        }
         for (index, element) in definition.alts[alt].elements.iter().enumerate() {
             let continues = step.is_some_and(|step| step.element == Some(index));
             let count = if continues {
@@ -353,7 +424,9 @@ impl<'g> Deriver<'g> {
             } else {
                 match element.suffix {
                     Suffix::One | Suffix::Plus => 1,
-                    Suffix::Optional | Suffix::Star => 0,
+                    Suffix::Optional | Suffix::Star => {
+                        if self.present.contains(&(rule.to_string(), alt, index)) { 1 } else { 0 }
+                    }
                 }
             };
             if element.suffix != Suffix::One {
@@ -363,7 +436,7 @@ impl<'g> Deriver<'g> {
                 let rest: &[Step] = if continues && occurrence == 0 { &plan[1..] } else { &[] };
                 match &element.atom {
                     Atom::Rule(child) => {
-                        if let Some(child_alt) = self.expand(child, rest, tokens, covered, occurrences, depth + 1) {
+                        if let Some(child_alt) = self.expand(child, rest, tokens, covered, occurrences, depth + 1, state) {
                             if self.is_parser_rule(child) {
                                 covered.insert(Target::Pair { rule: rule.to_string(), alt, element: index, child_alt });
                             }
@@ -375,7 +448,39 @@ impl<'g> Deriver<'g> {
                 }
             }
         }
+        state.context = outer;
         Some(alt)
+    }
+
+    /// A rule's alternatives and their elements, numbered as `present` and `types` keys use them.
+    pub fn describe_rule(&self, rule: &str) -> String {
+        let Some(definition) = self.grammar.rules.get(rule) else { return format!("no rule {rule}") };
+        let mut text = String::new();
+        for (alt, alternative) in definition.alts.iter().enumerate() {
+            let label = alternative.label.as_deref().map(|label| format!(" #{label}")).unwrap_or_default();
+            text.push_str(&format!("{rule}#{alt}{label}:\n"));
+            for (index, element) in alternative.elements.iter().enumerate() {
+                let atom = match &element.atom {
+                    Atom::Rule(name) => match self.grammar.rules.get(name) {
+                        Some(lifted) if lifted.parent.is_some() => {
+                            let inner: Vec<String> = lifted.alts.iter().map(|alt| {
+                                alt.elements.iter().map(|element| match &element.atom {
+                                    Atom::Rule(name) => name.clone(),
+                                    Atom::Literal(text) => format!("'{text}'"),
+                                    _ => "…".to_string(),
+                                }).collect::<Vec<_>>().join(" ")
+                            }).collect();
+                            format!("{name} = ( {} )", inner.join(" | "))
+                        }
+                        _ => name.clone(),
+                    },
+                    Atom::Literal(text) => format!("'{text}'"),
+                    other => format!("{other:?}"),
+                };
+                text.push_str(&format!("  .{index} {atom} {:?}\n", element.suffix));
+            }
+        }
+        text
     }
 
     /// A character an atom of a lexer rule matches.
@@ -437,5 +542,30 @@ impl<'g> Deriver<'g> {
                 }
             }
         }
+    }
+}
+
+/// The typing state of one sentence's derivation.
+struct Typed {
+    /// The type values take here.
+    context: Option<String>,
+    /// How many values of each type the sentence has used, so the values alternate.
+    uses: HashMap<String, usize>,
+    /// How many SAME contexts the sentence has resolved, so they take different types in turn.
+    same: usize,
+}
+
+impl Typed {
+    /// A concrete type for a declared one: SAME and ANY take the next type that has values.
+    fn resolve(&mut self, declared: &str, typing: &Typing) -> String {
+        if declared != "SAME" && declared != "ANY" {
+            return declared.to_string();
+        }
+        let types: Vec<&String> = typing.values.keys().collect();
+        if types.is_empty() {
+            return "INT64".to_string();
+        }
+        self.same += 1;
+        types[(self.same - 1) % types.len()].clone()
     }
 }
