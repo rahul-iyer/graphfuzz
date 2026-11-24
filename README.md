@@ -4,6 +4,20 @@ Generates graph queries from one AST, prints each in every engine's dialect, run
 engine, and reports where an engine disagrees with the reference engine (Neo4j by default) or with itself.
 Failing queries are reduced to minimal ones.
 
+## Schema and types
+
+The `schema:` section of `config.yml` declares the graph: node and edge types with typed properties (INT64,
+FLOAT64, STRING, BOOL, DATE, LOCAL DATETIME, ZONED DATETIME, DECIMAL). It becomes each engine's schema
+(DuckGQL's typed graph, Ladybug's tables; Neo4j needs none) and the fixture, whose values are written in each
+engine's dialect: a profile's `literals` say how (`DATE '…'` in GQL, `date('…')` in Cypher, overridable per
+engine). The generator tracks the type of every variable and expression, so it reads properties of the type it
+needs, compares values of one type, and inserts and sets values of each property's type. Results are
+normalized across engines: numbers to seven digits, dates to `YYYY-MM-DD`, datetimes to UTC
+`YYYY-MM-DDTHH:MM:SS`, and nodes, relationships, and paths to their labels and properties.
+
+DuckGQL has no temporal literals, so its connector writes temporal fixture values with SQL into its graph
+tables; queries that write temporal literals stay GQL and show the gap.
+
 ## Engines
 
 An engine in `config.yml` is a **connector** (how to reach it) and a **dialect** (how to write queries for it).

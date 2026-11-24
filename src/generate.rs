@@ -119,6 +119,8 @@ pub const FEATURES: &[(&str, &str)] = &[
     ("exists_match", "EXISTS { MATCH ... }"),
     ("float_literal", "approximate number literals"),
     ("string_literal", "string literals"),
+    ("temporal_literal", "DATE and DATETIME literals"),
+    ("decimal_literal", "exact decimal literals"),
     // Data modification
     ("insert_node", "INSERT of a node"),
     ("insert_path", "INSERT of a path"),
@@ -210,6 +212,7 @@ pub const GROUPS: &[(&str, &[&str])] = &[
         ],
     ),
     ("exists", &["exists_pattern", "exists_match"]),
+    ("types", &["temporal_literal", "decimal_literal", "float_literal", "string_literal", "is_typed"]),
     (
         "mutations",
         &[
@@ -706,13 +709,21 @@ impl<'a> Gen<'a> {
                 quant = Some(if searched { Quant::Plus } else { Quant::Range(1, 3) });
             }
         }
-        // A quantified edge over different endpoint types cannot repeat, so it keeps a self-loop type.
+        // A quantified edge over different endpoint types cannot repeat, so it takes a type from a node type to
+        // itself, or no quantifier when the schema has none.
         let mut label = Some(LabelExpr::Name(edge_type.label.to_string()));
         let mut next_label = Some(next);
         if quant.is_some() && !quantifiable {
-            label = Some(LabelExpr::Name("KNOWS".to_string()));
-            next_label = Some("Person");
-            dir = Dir::Right;
+            let loops: Vec<(&'static str, &'static str)> =
+                self.schema.edges.iter().filter(|edge| edge.source == edge.target && !edge.undirected).map(|edge| (edge.label, edge.source)).collect();
+            if loops.is_empty() {
+                quant = None;
+            } else {
+                let (edge_label, node_label) = *self.rng.pick(&loops);
+                label = Some(LabelExpr::Name(edge_label.to_string()));
+                next_label = Some(node_label);
+                dir = Dir::Right;
+            }
         }
         if !edge_type.undirected {
             if self.want("edge_left", 0.1) {
@@ -730,10 +741,13 @@ impl<'a> Gen<'a> {
         } else if self.want("edge_undirected_or_right", 0.05) {
             dir = Dir::UndirectedOrRight;
         }
-        if self.config.undirected && quant.is_none() && self.want("edge_undirected", 0.06) {
+        let undirected: Vec<(&'static str, &'static str)> =
+            self.schema.edges.iter().filter(|edge| edge.undirected).map(|edge| (edge.label, edge.target)).collect();
+        if self.config.undirected && quant.is_none() && !undirected.is_empty() && self.want("edge_undirected", 0.06) {
+            let (edge_label, node_label) = *self.rng.pick(&undirected);
             dir = Dir::Undirected;
-            label = Some(LabelExpr::Name("NEAR".to_string()));
-            next_label = Some("City");
+            label = Some(LabelExpr::Name(edge_label.to_string()));
+            next_label = Some(node_label);
         }
         if quant.is_none() && self.want("unlabeled_edge", 0.12) {
             label = None;
@@ -789,7 +803,7 @@ impl<'a> Gen<'a> {
             label_expr = Some(LabelExpr::Not(Box::new(LabelExpr::Name(self.rng.pick(&self.schema.nodes).label.to_string()))));
             known = None;
         } else if self.want("label_and", 0.02) {
-            let name = label.unwrap_or("Person").to_string();
+            let name = label.unwrap_or(self.schema.nodes[0].label).to_string();
             label_expr = Some(LabelExpr::And(Box::new(LabelExpr::Name(name.clone())), Box::new(LabelExpr::Name(name))));
         } else if self.want("label_wildcard", 0.02) {
             label_expr = Some(LabelExpr::Wildcard);
@@ -925,15 +939,45 @@ impl<'a> Gen<'a> {
         if values.is_empty() { None } else { Some(Expr::Var(self.rng.pick(&values).name.clone())) }
     }
 
-    fn any_scalar(&mut self, depth: u32) -> (Expr, Ty) {
-        let ty = *self.rng.pick(&[Ty::Int, Ty::Int, Ty::Str, Ty::Float, Ty::Bool]);
-        let expr = match ty {
+    /// A value type: the basic ones most often, and the schema's other property types too.
+    fn pick_type(&mut self) -> Ty {
+        let mut types = vec![Ty::Int, Ty::Int, Ty::Str, Ty::Float, Ty::Bool];
+        types.extend(self.schema.types().into_iter().filter(|ty| !matches!(ty, Ty::Int | Ty::Str | Ty::Float | Ty::Bool)));
+        *self.rng.pick(&types)
+    }
+
+    fn expr_of(&mut self, ty: Ty, depth: u32) -> Expr {
+        match ty {
             Ty::Int => self.int_expr(depth),
             Ty::Str => self.str_expr(depth),
             Ty::Float => self.float_expr(depth),
             Ty::Bool => self.bool_expr(depth),
-        };
-        (expr, ty)
+            Ty::Decimal => self.decimal_expr(depth),
+            Ty::Date | Ty::LocalDateTime | Ty::ZonedDateTime => self.temporal_expr(ty, depth),
+        }
+    }
+
+    fn any_scalar(&mut self, depth: u32) -> (Expr, Ty) {
+        let ty = self.pick_type();
+        (self.expr_of(ty, depth), ty)
+    }
+
+    /// Exact arithmetic on decimals; engines without a decimal type compute it approximately, within the
+    /// seven digits values are compared to.
+    fn decimal_expr(&mut self, depth: u32) -> Expr {
+        if depth > 0 && self.want("arith", 0.1) {
+            let op = *self.rng.pick(&[BinOp::Add, BinOp::Sub]);
+            return Expr::Bin(op, Box::new(self.decimal_expr(depth - 1)), Box::new(self.decimal_expr(0)));
+        }
+        self.leaf(Ty::Decimal)
+    }
+
+    /// A date or datetime: a property, a literal, or one of them through COALESCE.
+    fn temporal_expr(&mut self, ty: Ty, depth: u32) -> Expr {
+        if depth > 0 && self.want("coalesce", 0.03) {
+            return Expr::Func("coalesce".to_string(), vec![self.temporal_expr(ty, depth - 1), self.leaf(ty)]);
+        }
+        self.leaf(ty)
     }
 
     fn leaf(&mut self, ty: Ty) -> Expr {
@@ -953,6 +997,7 @@ impl<'a> Gen<'a> {
                 Expr::Lit(Lit::Str(self.rng.pick(&["Ada", "Bob", "v1", "City2", "r0", "", "a b"]).to_string()))
             }
             Ty::Bool => Expr::Lit(Lit::Bool(self.rng.chance(0.5))),
+            other => Expr::Lit(other.random(&mut self.rng)),
         }
     }
 
@@ -1090,7 +1135,7 @@ impl<'a> Gen<'a> {
                     }
                     "is_typed" => {
                         let (value, _) = self.any_scalar(0);
-                        let ty = *self.rng.pick(&["INTEGER", "FLOAT", "STRING", "BOOLEAN", "INT64"]);
+                        let ty = *self.rng.pick(&["INTEGER", "FLOAT", "STRING", "BOOLEAN", "INT64", "DATE"]);
                         Some(Expr::Typed(Box::new(value), ty.to_string(), self.rng.chance(0.3)))
                     }
                     "is_normalized" => Some(Expr::Normalized(Box::new(self.str_expr(0)), self.rng.chance(0.3))),
@@ -1110,7 +1155,10 @@ impl<'a> Gen<'a> {
                         let names = nodes.iter().take(3).map(|node| node.name.clone()).collect();
                         Some(if feature == "same" { Expr::Same(names) } else { Expr::AllDifferent(names) })
                     }
-                    "property_exists" => nodes.first().map(|node| Expr::PropertyExists(node.name.clone(), self.rng.pick(&["name", "age", "population"]).to_string())),
+                    "property_exists" => nodes.first().map(|node| {
+                        let names: Vec<&'static str> = self.schema.nodes.iter().flat_map(|node| node.props.iter().map(|prop| prop.name)).collect();
+                        Expr::PropertyExists(node.name.clone(), self.rng.pick(&names).to_string())
+                    }),
                     "exists_pattern" | "exists_match" if !nodes.is_empty() => {
                         let node = self.rng.pick(&nodes).clone();
                         let saved = self.scope.clone();
@@ -1152,13 +1200,11 @@ impl<'a> Gen<'a> {
 
     fn comparison(&mut self, depth: u32) -> Expr {
         let op = *self.rng.pick(&[BinOp::Eq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge]);
-        let ty = *self.rng.pick(&[Ty::Int, Ty::Int, Ty::Str, Ty::Float, Ty::Bool]);
+        let ty = self.pick_type();
         let child = depth.saturating_sub(1);
         let (left, right) = match ty {
-            Ty::Int => (self.int_expr(child), self.int_expr(0)),
-            Ty::Str => (self.str_expr(child), self.str_expr(0)),
-            Ty::Float => (self.float_expr(child), self.float_expr(0)),
             Ty::Bool => (self.leaf(Ty::Bool), Expr::Lit(Lit::Bool(self.rng.chance(0.5)))),
+            other => (self.expr_of(other, child), self.expr_of(other, 0)),
         };
         let op = if ty == Ty::Bool { *self.rng.pick(&[BinOp::Eq, BinOp::Ne]) } else { op };
         Expr::Bin(op, Box::new(left), Box::new(right))
@@ -1178,10 +1224,8 @@ impl<'a> Gen<'a> {
                 continue;
             }
             let value = match prop.ty {
-                Ty::Int => Expr::Lit(Lit::Int(self.rng.range(1, 60))),
-                Ty::Float => Expr::Lit(Lit::Float(self.rng.range(0, 40) as f64 / 4.0)),
                 Ty::Str => Expr::Lit(Lit::Str(format!("new{}", self.rng.range(0, 9)))),
-                Ty::Bool => Expr::Lit(Lit::Bool(self.rng.chance(0.5))),
+                ty => Expr::Lit(ty.random(&mut self.rng)),
             };
             props.push((prop.name.to_string(), value));
         }
@@ -1330,10 +1374,8 @@ impl<'a> Gen<'a> {
                     clauses.push(Clause::Remove(vec![RemoveItem::Prop(node.name.clone(), prop.to_string())]));
                 } else {
                     let value = match ty {
-                        Ty::Int => self.int_expr(1),
-                        Ty::Float => self.float_expr(1),
-                        Ty::Str => self.str_expr(1),
                         Ty::Bool => self.bool_expr(0),
+                        other => self.expr_of(other, 1),
                     };
                     clauses.push(Clause::Set(vec![SetItem::Prop(node.name.clone(), prop.to_string(), value)]));
                 }
@@ -1378,9 +1420,10 @@ impl<'a> Gen<'a> {
                 let base = self.new_id() * 10;
                 self.next_id += 10;
                 let values: Vec<Expr> = (1..=self.rng.range(1, 3)).map(|offset| Expr::Lit(Lit::Int(base + offset))).collect();
+                let node_label = self.rng.pick(&self.schema.nodes).label;
                 let node = NodePat {
                     var: None,
-                    label: Some(LabelExpr::Name("City".to_string())),
+                    label: Some(LabelExpr::Name(node_label.to_string())),
                     props: vec![("id".to_string(), Expr::Var("x".to_string()))],
                     filter: None,
                 };
@@ -1391,11 +1434,18 @@ impl<'a> Gen<'a> {
             }
             _ => {
                 // next_set: the statement after NEXT sets a property of the nodes the first one returned.
+                let candidates: Vec<(&'static str, &'static str, Ty)> = self
+                    .schema
+                    .nodes
+                    .iter()
+                    .flat_map(|node| node.props.iter().filter(|prop| !prop.required).map(move |prop| (node.label, prop.name, prop.ty)))
+                    .collect();
+                let (node_label, prop_name, prop_ty) = *self.rng.pick(&candidates);
                 let path = PathPat {
                     var: None,
                     search: None,
                     mode: None,
-                    start: NodePat { var: Some("q".to_string()), label: Some(LabelExpr::Name("Person".to_string())), ..Default::default() },
+                    start: NodePat { var: Some("q".to_string()), label: Some(LabelExpr::Name(node_label.to_string())), ..Default::default() },
                     hops: vec![],
                 };
                 let first = Linear {
@@ -1414,8 +1464,8 @@ impl<'a> Gen<'a> {
                         limit: None,
                     }),
                 };
-                let value = Expr::Lit(Lit::Int(self.rng.range(1, 99)));
-                let second = Linear { clauses: vec![Clause::Set(vec![SetItem::Prop("q".to_string(), "age".to_string(), value)])], tail: Tail::None };
+                let value = Expr::Lit(prop_ty.random(&mut self.rng));
+                let second = Linear { clauses: vec![Clause::Set(vec![SetItem::Prop("q".to_string(), prop_name.to_string(), value)])], tail: Tail::None };
                 Query::Next(vec![first, second])
             }
         }

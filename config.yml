@@ -10,6 +10,29 @@ out: runs/latest
 # How long one statement may run before it is interrupted (milliseconds).
 timeout_ms: 10000
 
+# The graph every engine loads: node and edge types and their typed properties. Types are INT64, FLOAT64,
+# STRING, BOOL, DATE, LOCAL DATETIME, ZONED DATETIME, and DECIMAL; add NOT NULL for a required property.
+# Every node type needs `id: INT64 NOT NULL`, by which the fixture finds nodes. `count` is how many nodes of a
+# type the fixture has; each edge type gets about twice its source type's count. Undirected edge types are
+# used only by DuckGQL's GQL-only exploration. DuckGQL keeps one property name to one type across node types.
+schema:
+  nodes:
+    Person:
+      count: 12
+      properties: {id: INT64 NOT NULL, name: STRING, age: INT64, score: FLOAT64, active: BOOL, born: DATE, joined: LOCAL DATETIME, seen: ZONED DATETIME, balance: DECIMAL}
+    City:
+      count: 5
+      properties: {id: INT64 NOT NULL, name: STRING, population: INT64, established: DATE}
+    Company:
+      count: 4
+      properties: {id: INT64 NOT NULL, name: STRING, founded: INT64, revenue: DECIMAL}
+  edges:
+    KNOWS: {from: Person, to: Person, properties: {since: INT64, weight: FLOAT64, met: DATE}}
+    LIVES_IN: {from: Person, to: City, properties: {since: INT64}}
+    WORKS_AT: {from: Person, to: Company, properties: {since: INT64, role: STRING, started: LOCAL DATETIME}}
+    LOCATED_IN: {from: Company, to: City}
+    NEAR: {from: City, to: City, undirected: true, properties: {km: INT64}}
+
 # The engine every other engine is compared against. Remove it to check each engine against itself only.
 reference: neo4j
 
@@ -37,6 +60,9 @@ engines:
     dialect: opencypher
     path: runs/ladybug.lbdb     # recreated at the start of every run
     supported: [label_or, exists_match]
+    syntax:
+      # Ladybug has no localdatetime() or datetime(); it has TIMESTAMP and TIMESTAMP_TZ.
+      literals: {local_datetime: "timestamp('{}')", zoned_datetime: "CAST('{}' AS TIMESTAMP_TZ)"}
 
   # Amazon Neptune, or any endpoint that takes form-encoded openCypher over HTTP. It has no transactions,
   # so data-modifying cases are skipped. IAM-authenticated clusters need a signing proxy (headers can carry

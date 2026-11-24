@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::derive::Coverage;
 use crate::engine::EngineConfig;
+use crate::schema::SchemaConfig;
 use crate::generate::{FEATURES, GROUPS};
 
 #[derive(Deserialize, Debug, Clone)]
@@ -18,6 +19,8 @@ pub struct FileConfig {
     /// Where the report and the per-case results go, relative to the config file.
     pub out: PathBuf,
     pub timeout_ms: u64,
+    /// The graph: node and edge types with typed properties.
+    pub schema: SchemaConfig,
     /// The engine every other engine is compared against; none checks each engine against itself only.
     pub reference: Option<String>,
     /// The engines, by name.
@@ -77,6 +80,7 @@ impl Default for FileConfig {
             seed: 1,
             out: PathBuf::from("runs/latest"),
             timeout_ms: 10_000,
+            schema: SchemaConfig::social(),
             reference: Some("neo4j".to_string()),
             engines: default_engines(),
             phases: Phases::default(),
@@ -192,6 +196,7 @@ impl FileConfig {
             config.out = path.parent().unwrap_or(Path::new(".")).join(&config.out);
         }
         config.weights()?;
+        config.schema.build(true)?;
         for (name, grammar) in &mut config.grammars {
             if grammar.file.is_relative() {
                 grammar.file = path.parent().unwrap_or(Path::new(".")).join(&grammar.file);

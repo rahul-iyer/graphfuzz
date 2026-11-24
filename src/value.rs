@@ -94,7 +94,8 @@ impl Val {
             serde_json::Value::Null => Val::Null,
             serde_json::Value::Bool(value) => Val::Bool(*value),
             serde_json::Value::Number(number) => Val::Num(number.as_f64().unwrap_or(f64::NAN)),
-            serde_json::Value::String(text) => Val::Str(text.clone()),
+            // Neo4j writes temporal values as ISO 8601 text.
+            serde_json::Value::String(text) => Val::Str(canonical_temporal(text).unwrap_or_else(|| text.clone())),
             serde_json::Value::Array(items) => Val::List(items.iter().map(Val::from_json).collect()),
             serde_json::Value::Object(fields) => Val::Map(fields.iter().map(|(name, value)| (name.clone(), Val::from_json(value))).collect()),
         }
@@ -118,6 +119,22 @@ impl Val {
             D::Double(value) => Val::Num(value),
             D::Decimal(value) => Val::Num(value.to_string().parse().unwrap_or(f64::NAN)),
             D::Text(text) => Val::Str(text),
+            D::Date32(days) => {
+                let epoch = time::Date::from_calendar_date(1970, time::Month::January, 1).unwrap();
+                Val::Str(date_text(epoch + time::Duration::days(days as i64)))
+            }
+            D::Timestamp(unit, value) => {
+                let nanos = match unit {
+                    duckdb::types::TimeUnit::Second => value as i128 * 1_000_000_000,
+                    duckdb::types::TimeUnit::Millisecond => value as i128 * 1_000_000,
+                    duckdb::types::TimeUnit::Microsecond => value as i128 * 1_000,
+                    duckdb::types::TimeUnit::Nanosecond => value as i128,
+                };
+                match time::OffsetDateTime::from_unix_timestamp_nanos(nanos) {
+                    Ok(value) => Val::Str(datetime_text(value)),
+                    Err(_) => Val::Other(format!("timestamp {value}")),
+                }
+            }
             D::List(items) | D::Array(items) => Val::List(items.into_iter().map(Val::from_duckdb).collect()),
             D::Struct(fields) => {
                 let fields: Vec<(String, Val)> = fields.iter().map(|(name, value)| (name.clone(), Val::from_duckdb(value.clone()))).collect();
@@ -149,6 +166,62 @@ impl Val {
 }
 
 pub type Row = Vec<Val>;
+
+/// A date as engines agree on it: `YYYY-MM-DD`.
+pub fn date_text(date: time::Date) -> String {
+    format!("{:04}-{:02}-{:02}", date.year(), date.month() as u8, date.day())
+}
+
+/// A datetime as engines agree on it: in UTC when it is zoned, as `YYYY-MM-DDTHH:MM:SS`, with a fraction only
+/// when it is not zero.
+pub fn datetime_text(value: time::OffsetDateTime) -> String {
+    let value = value.to_offset(time::UtcOffset::UTC);
+    let mut text = format!("{}T{:02}:{:02}:{:02}", date_text(value.date()), value.hour(), value.minute(), value.second());
+    let nanos = value.nanosecond();
+    if nanos != 0 {
+        let fraction = format!("{nanos:09}");
+        text.push('.');
+        text.push_str(fraction.trim_end_matches('0'));
+    }
+    text
+}
+
+/// Reads an ISO 8601 date or datetime, with an optional offset, into the shared form; None for other text.
+pub fn canonical_temporal(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 10 || bytes[4] != b'-' || bytes[7] != b'-' || !text[..4].chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let year: i32 = text[..4].parse().ok()?;
+    let month: u8 = text[5..7].parse().ok()?;
+    let day: u8 = text[8..10].parse().ok()?;
+    let date = time::Date::from_calendar_date(year, time::Month::try_from(month).ok()?, day).ok()?;
+    if text.len() == 10 {
+        return Some(date_text(date));
+    }
+    let rest = &text[10..];
+    let rest = rest.strip_prefix('T').or_else(|| rest.strip_prefix(' '))?;
+    // The clock, then an optional fraction, then an optional zone.
+    let zone_at = rest.find(['Z', '+']).or_else(|| rest.rfind('-')).unwrap_or(rest.len());
+    let (clock, zone) = rest.split_at(zone_at);
+    let (clock, fraction) = clock.split_once('.').unwrap_or((clock, ""));
+    let parts: Vec<&str> = clock.split(':').collect();
+    let hour: u8 = parts.first()?.trim().parse().ok()?;
+    let minute: u8 = parts.get(1).map(|part| part.parse().ok()).unwrap_or(Some(0))?;
+    let second: u8 = parts.get(2).map(|part| part.parse().ok()).unwrap_or(Some(0))?;
+    let nanos: u32 = if fraction.is_empty() { 0 } else { format!("{:0<9}", &fraction[..fraction.len().min(9)]).parse().ok()? };
+    let wall = time::PrimitiveDateTime::new(date, time::Time::from_hms_nano(hour, minute, second, nanos).ok()?);
+    let offset = match zone.trim() {
+        "" | "Z" => time::UtcOffset::UTC,
+        zone => {
+            let sign = if zone.starts_with('-') { -1 } else { 1 };
+            let digits: Vec<i8> = zone[1..].split(':').filter_map(|part| part.parse().ok()).collect();
+            let (hours, minutes) = (digits.first().copied().unwrap_or(0), digits.get(1).copied().unwrap_or(0));
+            time::UtcOffset::from_hms(sign * hours, sign * minutes, 0).ok()?
+        }
+    };
+    Some(datetime_text(wall.assume_offset(offset)))
+}
 
 /// Rows as a sorted list of keys, so two results compare as multisets.
 pub fn multiset(rows: &[Row]) -> Vec<String> {

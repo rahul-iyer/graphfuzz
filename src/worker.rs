@@ -180,6 +180,10 @@ fn ladybug_value(value: lbug::Value) -> Val {
         L::Float(value) => Val::Num(value as f64),
         L::Decimal(value) => Val::Num(value.to_string().parse().unwrap_or(f64::NAN)),
         L::String(text) => Val::Str(text),
+        L::Date(date) => Val::Str(crate::value::date_text(date)),
+        L::Timestamp(value) | L::TimestampTz(value) | L::TimestampNs(value) | L::TimestampMs(value) | L::TimestampSec(value) => {
+            Val::Str(crate::value::datetime_text(value))
+        }
         L::List(_, items) | L::Array(_, items) => Val::List(items.into_iter().map(ladybug_value).collect()),
         L::Struct(fields) => Val::Map(fields.into_iter().map(|(name, value)| (name, ladybug_value(value))).collect()),
         L::Node(node) => Val::node(

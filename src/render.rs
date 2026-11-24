@@ -16,6 +16,12 @@ pub fn gql(query: &Query) -> String {
     render(query, gql_profile())
 }
 
+/// A literal as the profile writes it.
+pub fn literal(literal: &Lit, profile: &Profile) -> String {
+    let mut printer = Printer { profile, scope: false };
+    printer.literal(literal)
+}
+
 pub fn render(query: &Query, profile: &Profile) -> String {
     let mut printer = Printer { profile, scope: false };
     format!("{}{}", profile.prefix, printer.query(query))
@@ -395,9 +401,18 @@ impl Printer<'_> {
             Lit::Str(value) => quote(value),
             Lit::Bool(value) => value.to_string().to_uppercase(),
             Lit::Null => "NULL".to_string(),
-            Lit::Date(value) => format!("DATE {}", quote(value)),
-            Lit::Duration(value) => format!("DURATION {}", quote(value)),
+            Lit::Decimal(value) => value.clone(),
+            Lit::Date(value) => self.typed_literal("date", "DATE '{}'", value),
+            Lit::LocalDateTime(value) => self.typed_literal("local_datetime", "TIMESTAMP '{}'", value),
+            Lit::ZonedDateTime(value) => self.typed_literal("zoned_datetime", "TIMESTAMP '{}'", value),
+            Lit::Duration(value) => self.typed_literal("duration", "DURATION '{}'", value),
         }
+    }
+
+    /// A value written with the profile's template for its type, as date('2021-03-04') in Cypher.
+    fn typed_literal(&self, kind: &str, default: &str, value: &str) -> String {
+        let template = self.profile.syntax.literals.get(kind).map(String::as_str).unwrap_or(default);
+        template.replace("{}", &value.replace('\'', "''"))
     }
 
     fn expr(&mut self, expr: &Expr) -> String {

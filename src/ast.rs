@@ -121,7 +121,18 @@ pub enum Lit {
     Bool(bool),
     Null,
     Date(String),
+    LocalDateTime(String),
+    /// In UTC, as `2021-03-04T05:06:07Z`.
+    ZonedDateTime(String),
+    /// An exact number, as `12.345`.
+    Decimal(String),
     Duration(String),
+}
+
+impl Lit {
+    pub fn temporal(&self) -> bool {
+        matches!(self, Lit::Date(_) | Lit::LocalDateTime(_) | Lit::ZonedDateTime(_) | Lit::Duration(_))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

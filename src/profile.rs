@@ -54,6 +54,9 @@ pub struct Syntax {
     pub functions: BTreeMap<String, String>,
     /// GQL functions the language writes as binary operators, as MOD(a, b) is a % b.
     pub operators: BTreeMap<String, String>,
+    /// How to write a value of each type, with {} for the value: date, local_datetime, zoned_datetime, duration.
+    #[serde(default)]
+    pub literals: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Clone, Debug)]

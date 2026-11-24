@@ -19,3 +19,5 @@ syntax:
   labeled: gql                # n IS LABELED A
   functions: {}
   operators: {}
+  # GQL's datetime literal is zoned when its string has an offset.
+  literals: {date: "DATE '{}'", local_datetime: "TIMESTAMP '{}'", zoned_datetime: "TIMESTAMP '{}'", duration: "DURATION '{}'"}

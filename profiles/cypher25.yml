@@ -35,3 +35,4 @@ syntax:
   labeled: gql
   functions: {collect_list: collect, element_id: elementId}
   operators: {mod: "%", power: "^"}
+  literals: {date: "date('{}')", local_datetime: "localdatetime('{}')", zoned_datetime: "datetime('{}')", duration: "duration('{}')"}

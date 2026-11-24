@@ -294,6 +294,8 @@ impl Found {
         match expr {
             Expr::Lit(Lit::Float(_)) => self.add("float_literal"),
             Expr::Lit(Lit::Str(_)) => self.add("string_literal"),
+            Expr::Lit(Lit::Decimal(_)) => self.add("decimal_literal"),
+            Expr::Lit(literal) if literal.temporal() => self.add("temporal_literal"),
             Expr::Lit(_) | Expr::Var(_) | Expr::Prop(..) | Expr::Param(_) => {}
             Expr::Bin(op, left, right) => {
                 match op {

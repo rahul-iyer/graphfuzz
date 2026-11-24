@@ -99,12 +99,12 @@ pub fn run_grammars(file: &FileConfig, slots: &mut [Slot], schema: &Schema, out:
     let mut report = String::new();
     let _ = writeln!(report, "# graphfuzz grammar report\n\nSeed {}. Every choice each grammar offers, each tried with the shortest sentence that makes it, in a rolled-back transaction.\n", file.seed);
     let mut jsonl = std::fs::File::create(out.join("grammar.jsonl"))?;
-    let fixture = schema.fixture(file.seed);
+    let undirected = file.schema.build(true)?;
     for (name, settings) in &file.grammars {
         if !settings.enabled {
             continue;
         }
-        run_grammar(name, settings, slots, schema, &fixture, &mut report, &mut jsonl)?;
+        run_grammar(name, settings, slots, schema, &undirected, file.seed, &mut report, &mut jsonl)?;
     }
     std::fs::write(out.join("grammar.md"), report)?;
     eprintln!("wrote {} and {}", out.join("grammar.md").display(), out.join("grammar.jsonl").display());
@@ -116,7 +116,8 @@ fn run_grammar(
     settings: &GrammarConfig,
     slots: &mut [Slot],
     schema: &Schema,
-    fixture: &crate::schema::Fixture,
+    undirected: &Schema,
+    seed: u64,
     report: &mut String,
     jsonl: &mut std::fs::File,
 ) -> Result<()> {
@@ -157,7 +158,8 @@ fn run_grammar(
         if (count + 1) % 250 == 0 || count + 1 == distinct.len() {
             for (position, &index) in engines.iter().enumerate() {
                 if digests(&mut slots[index], schema)? != initial[position] {
-                    slots[index].engine.setup(schema, fixture)?;
+                    let profile = slots[index].profile.clone();
+                    slots[index].engine.setup(schema, undirected, seed, &profile)?;
                     *reloads.entry(slots[index].name.clone()).or_default() += 1;
                 }
             }

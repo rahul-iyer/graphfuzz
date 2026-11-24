@@ -9,8 +9,11 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::ast::Lit;
 use crate::neo::{Neo, TRANSPORT_ERROR};
-use crate::schema::{Fixture, Schema, Ty};
+use crate::profile::Profile;
+use crate::render;
+use crate::schema::{Schema, Ty};
 use crate::value::{Row, Val};
 use crate::worker::{RunOutcome, Statement, StatementResult, Worker};
 
@@ -45,8 +48,9 @@ impl Outcome {
 }
 
 pub trait Engine {
-    /// Loads the fixture, replacing whatever the engine held.
-    fn setup(&mut self, schema: &Schema, fixture: &Fixture) -> Result<()>;
+    /// Loads the seed's fixture for the schema, written in the engine's dialect, replacing whatever it held.
+    /// `undirected` is the schema with undirected edge types, for an engine that also holds that graph.
+    fn setup(&mut self, schema: &Schema, undirected: &Schema, seed: u64, profile: &Profile) -> Result<()>;
     fn read(&mut self, query: &str) -> Result<Outcome>;
     /// Whether data modification can run in a transaction that is rolled back.
     fn transactional(&self) -> bool;
@@ -151,14 +155,41 @@ struct DuckGql {
     graph: &'static str,
 }
 
+/// A temporal value as DuckDB SQL writes it.
+fn sql_temporal(value: &Lit) -> Option<String> {
+    Some(match value {
+        Lit::Date(text) => format!("DATE '{text}'"),
+        Lit::LocalDateTime(text) => format!("TIMESTAMP '{text}'"),
+        Lit::ZonedDateTime(text) => format!("TIMESTAMPTZ '{text}'"),
+        _ => return None,
+    })
+}
+
 impl Engine for DuckGql {
-    fn setup(&mut self, _schema: &Schema, fixture: &Fixture) -> Result<()> {
+    fn setup(&mut self, schema: &Schema, undirected: &Schema, seed: u64, profile: &Profile) -> Result<()> {
         let mut statements = Vec::new();
-        for (name, undirected) in [("fuzz", false), ("fuzzu", true)] {
-            let schema = Schema::social(undirected);
+        // A fresh database numbers its graphs from 1, in the order they are created.
+        for (position, (name, schema)) in [("fuzz", schema), ("fuzzu", undirected)].into_iter().enumerate() {
+            let graph_id = position + 1;
+            let fixture = schema.fixture(seed);
             statements.push(schema.gql_create_graph(name));
             statements.push(format!("SESSION SET GRAPH {name}"));
-            statements.extend(schema.fixture(fixture.seed).gql_statements());
+            // GQL cannot write a temporal value DuckGQL accepts, so those go in with SQL on its graph tables, by
+            // the element ids the inserts allocate in order.
+            statements.extend(fixture.statements(|value| !value.temporal()).iter().map(|query| render::render(query, profile)));
+            let mut update = |table: &str, key: &str, index: usize, props: &[(&'static str, Lit)]| {
+                let sets: Vec<String> =
+                    props.iter().filter_map(|(prop, value)| sql_temporal(value).map(|value| format!("\"{prop}\" = {value}"))).collect();
+                if !sets.is_empty() {
+                    statements.push(format!("UPDATE gql_data.graph_{graph_id}_{table} SET {} WHERE \"{key}\" = {}", sets.join(", "), index + 1));
+                }
+            };
+            for (index, node) in fixture.nodes.iter().enumerate() {
+                update("vertices", "__gql_id", index, &node.props);
+            }
+            for (index, edge) in fixture.edges.iter().enumerate() {
+                update("edges", "__gql_edge_id", index, &edge.props);
+            }
         }
         let setup = statements.into_iter().map(|sql| Statement { sql, read: false }).collect();
         self.worker = Some(Worker::new(vec!["duckgql".to_string()], setup, self.timeout));
@@ -222,11 +253,15 @@ fn ladybug_type(ty: Ty) -> &'static str {
         Ty::Float => "DOUBLE",
         Ty::Str => "STRING",
         Ty::Bool => "BOOLEAN",
+        Ty::Date => "DATE",
+        Ty::LocalDateTime => "TIMESTAMP",
+        Ty::ZonedDateTime => "TIMESTAMP_TZ",
+        Ty::Decimal => "DECIMAL(18,3)",
     }
 }
 
 impl Engine for Ladybug {
-    fn setup(&mut self, schema: &Schema, fixture: &Fixture) -> Result<()> {
+    fn setup(&mut self, schema: &Schema, _undirected: &Schema, seed: u64, profile: &Profile) -> Result<()> {
         let mut statements = Vec::new();
         for node in &schema.nodes {
             let columns: Vec<String> = node.props.iter().map(|prop| format!("{} {}", prop.name, ladybug_type(prop.ty))).collect();
@@ -237,7 +272,7 @@ impl Engine for Ladybug {
             columns.extend(edge.props.iter().map(|prop| format!("{} {}", prop.name, ladybug_type(prop.ty))));
             statements.push(format!("CREATE REL TABLE {}({})", edge.label, columns.join(", ")));
         }
-        statements.extend(fixture.cypher_statements().into_iter().skip(1));
+        statements.extend(schema.fixture(seed).statements(|_| true).iter().map(|query| render::render(query, profile)));
         let setup = statements.into_iter().map(|sql| Statement { sql, read: false }).collect();
         let args = vec!["ladybug".to_string(), "--path".to_string(), self.path.display().to_string()];
         self.worker = Some(Worker::new(args, setup, self.timeout));
@@ -283,8 +318,10 @@ struct Neo4jHttp {
 }
 
 impl Engine for Neo4jHttp {
-    fn setup(&mut self, _schema: &Schema, fixture: &Fixture) -> Result<()> {
-        for statement in fixture.cypher_statements() {
+    fn setup(&mut self, schema: &Schema, _undirected: &Schema, seed: u64, profile: &Profile) -> Result<()> {
+        let mut statements = vec!["MATCH (n) DETACH DELETE n".to_string()];
+        statements.extend(schema.fixture(seed).statements(|_| true).iter().map(|query| render::render(query, profile)));
+        for statement in statements {
             if let StatementResult::Error(error) = self.neo.run(&statement)? {
                 bail!("loading the Neo4j fixture failed: {error}\n{statement}");
             }
@@ -354,8 +391,10 @@ impl OpenCypherHttp {
 }
 
 impl Engine for OpenCypherHttp {
-    fn setup(&mut self, _schema: &Schema, fixture: &Fixture) -> Result<()> {
-        for statement in fixture.cypher_statements() {
+    fn setup(&mut self, schema: &Schema, _undirected: &Schema, seed: u64, profile: &Profile) -> Result<()> {
+        let mut statements = vec!["MATCH (n) DETACH DELETE n".to_string()];
+        statements.extend(schema.fixture(seed).statements(|_| true).iter().map(|query| render::render(query, profile)));
+        for statement in statements {
             match self.post(&statement) {
                 Outcome::Error(error) | Outcome::Transport(error) => bail!("loading the fixture failed: {error}\n{statement}"),
                 _ => {}

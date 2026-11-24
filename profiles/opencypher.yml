@@ -58,3 +58,5 @@ syntax:
   labeled: colon              # n:A
   functions: {collect_list: collect, element_id: id, path_length: length, upper: toUpper, lower: toLower, char_length: size, ln: log}
   operators: {mod: "%", power: "^"}
+  # openCypher 9's temporal functions.
+  literals: {date: "date('{}')", local_datetime: "localdatetime('{}')", zoned_datetime: "datetime('{}')", duration: "duration('{}')"}

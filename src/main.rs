@@ -126,7 +126,7 @@ fn main() -> Result<()> {
             if !gql {
                 exclude.extend(IMPLEMENTATION_DEFINED);
             }
-            let schema = Schema::social(gql);
+            let schema = file.schema.build(gql)?;
             let config = Config { exclude, undirected: gql, isolate: None, weights: file.weights()? };
             let mut generator = Gen::new(file.seed, &schema, &config);
             for _ in 0..count {
@@ -142,7 +142,7 @@ fn main() -> Result<()> {
         Command::Grammar { config } => {
             let file = FileConfig::load(Some(&config))?;
             fs::create_dir_all(&file.out)?;
-            let schema = Schema::social(false);
+            let schema = file.schema.build(false)?;
             let mut slots = connect_all(&file, &config, &schema)?;
             grammar_run::run_grammars(&file, &mut slots, &schema, &file.out)
         }
@@ -178,7 +178,7 @@ fn main() -> Result<()> {
         Command::Repro { config, gql, cypher, engines } => {
             let file = FileConfig::load(Some(&config))?;
             let only: Option<BTreeSet<String>> = engines.map(|names| names.split(',').map(|name| name.trim().to_string()).collect());
-            let schema = Schema::social(false);
+            let schema = file.schema.build(false)?;
             let mut slots = connect_all(&file, &config, &schema)?;
             for slot in &mut slots {
                 if only.as_ref().is_some_and(|only| !only.contains(&slot.name)) {
@@ -208,7 +208,7 @@ fn features_named(names: &[String]) -> BTreeSet<&'static str> {
 fn connect_all(file: &FileConfig, config_path: &Path, schema: &Schema) -> Result<Vec<Slot>> {
     let base = config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let timeout = Duration::from_millis(file.timeout_ms);
-    let fixture = schema.fixture(file.seed);
+    let undirected = file.schema.build(true)?;
     let mut slots = Vec::new();
     for (name, config) in &file.engines {
         if !config.enabled {
@@ -216,7 +216,7 @@ fn connect_all(file: &FileConfig, config_path: &Path, schema: &Schema) -> Result
         }
         let profile = Profile::load(&config.dialect, &base, &config.supported, &config.unsupported, config.syntax.as_ref())?;
         let mut engine = engine::connect(name, config, &base, timeout)?;
-        engine.setup(schema, &fixture)?;
+        engine.setup(schema, &undirected, file.seed, &profile)?;
         slots.push(Slot { name: name.clone(), engine, profile, metamorphic: config.metamorphic, undirected_graph: config.connector == "duckgql" });
     }
     if slots.is_empty() {
@@ -253,8 +253,8 @@ fn run(config_path: &Path) -> Result<()> {
     let file = FileConfig::load(Some(config_path))?;
     fs::create_dir_all(&file.out)?;
     let started = Instant::now();
-    let compared = Schema::social(false);
-    let undirected = Schema::social(true);
+    let compared = file.schema.build(false)?;
+    let undirected = file.schema.build(true)?;
     let weights = file.weights()?;
     let mut slots = connect_all(&file, config_path, &compared)?;
     let names: Vec<String> = slots.iter().map(|slot| slot.name.clone()).collect();
