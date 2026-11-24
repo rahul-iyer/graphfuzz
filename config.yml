@@ -1,0 +1,56 @@
+# graphfuzz run configuration. Every setting is optional; the values below are the defaults.
+# Run with: graphfuzz run --config config.yml
+
+# The seed decides the fixture data and every generated query, so a run can be repeated exactly.
+seed: 1
+
+# Where report.md and results.jsonl go, relative to this file.
+out: runs/latest
+
+# How long one statement may run before it is interrupted (milliseconds).
+timeout_ms: 10000
+
+neo4j:
+  # Compare against Neo4j. Without it, DuckGQL is checked against itself only (metamorphic checks).
+  enabled: true
+  url: http://localhost:7474
+  user: neo4j
+  password: graphfuzz123
+
+phases:
+  # Queries per feature with only that feature on, over a fixed base query.
+  isolate: 6
+  # The features (or groups) to isolate; empty means all of them.
+  isolate_features: []
+  # Random queries both engines must answer the same.
+  compare: 1000
+  # Random queries that may use GQL-only features, checked on DuckGQL alone.
+  explore: 400
+
+generator:
+  # The share of random queries that modify data (run in a transaction that is rolled back).
+  mutation_share: 0.15
+
+  # Multiplies how often a feature, or every feature of a group, is used; 0 turns it off.
+  # A feature's own weight overrides its group's. `graphfuzz features` lists both.
+  weights: {}
+  #   optional_match: 5
+  #   paths: 3
+  #   aggregates: 2
+  #   quant_star: 0
+
+  # Features or groups to use wherever the generator can.
+  focus: []
+  #   - quant_range
+
+  # Features or groups never to use.
+  disable: []
+  #   - return_star
+
+checks:
+  # Rewrites that must not change an answer: partitioning a filter, reversing paths, count(*), DISTINCT.
+  metamorphic: true
+  # Shrink one failing case per failure group to a minimal query.
+  reduce: true
+  # Variants tried per reduction.
+  reduce_budget: 150

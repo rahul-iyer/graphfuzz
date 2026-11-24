@@ -1,0 +1,16 @@
+[package]
+name = "graphfuzz"
+version = "0.1.0"
+edition = "2024"
+description = "Generates graph queries as ISO GQL and Cypher, runs them on DuckGQL and Neo4j, and reports where they disagree"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+# Links the libduckdb that DUCKDB_LIB_DIR names, so it can be a DuckDB build with extensions linked in.
+duckdb = { version = "=1.20000.2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_yaml = "0.9"
+ureq = { version = "3", features = ["json"] }
