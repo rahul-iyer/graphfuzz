@@ -1,33 +1,47 @@
-//! Turns case results into a Markdown report: verdict totals, failures grouped by error signature with the
-//! shortest example of each, and a per-feature matrix.
+//! Turns case results into a Markdown report: verdicts per engine, then for each engine its wrong answers,
+//! failures grouped by error with the smallest example of each, and a feature matrix.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use crate::check::{CaseResult, Verdict, signature};
-use crate::generate::{FEATURES, GQL_ONLY};
+use crate::generate::FEATURES;
+use crate::profile::Profile;
 
-/// The query that best shows a group: the shortest.
-fn shortest<'a>(cases: &[&'a CaseResult]) -> &'a CaseResult {
-    cases.iter().min_by_key(|case| case.gql.len()).unwrap()
+fn code(text: &str) -> String {
+    format!("```\n{text}\n```\n")
 }
 
-fn failure_message(case: &CaseResult) -> Option<String> {
-    match &case.verdict {
-        Verdict::DuckRejects { message, .. } | Verdict::DuckOnlyError { message, .. } => Some(signature(message)),
+fn verdict<'a>(case: &'a CaseResult, engine: &str) -> Option<&'a Verdict> {
+    case.verdicts.get(engine)
+}
+
+/// The error a failed case shows, grouped by message.
+fn failure_message(case: &CaseResult, engine: &str) -> Option<String> {
+    match verdict(case, engine)? {
+        Verdict::TargetRejects { message, .. } | Verdict::TargetOnlyError { message, .. } => Some(signature(message)),
         Verdict::Crash(detail) => Some(format!("crash: {}", signature(detail))),
         Verdict::Timeout => Some("timeout".to_string()),
         _ => None,
     }
 }
 
+fn wrong(case: &CaseResult, engine: &str) -> bool {
+    matches!(verdict(case, engine), Some(Verdict::Mismatch { .. } | Verdict::Metamorphic { .. }))
+}
+
+/// The case that best shows a group: one that was reduced, else the shortest.
+fn representative<'a>(cases: &[&'a CaseResult], engine: &str) -> &'a CaseResult {
+    cases.iter().find(|case| case.reduced.contains_key(engine)).copied().unwrap_or_else(|| cases.iter().min_by_key(|case| case.gql.len()).unwrap())
+}
+
 /// The features a group of cases uses more often than all cases do, most over-represented first.
-fn overrepresented(group: &[&CaseResult], all: &[CaseResult]) -> Vec<String> {
-    let mut lifts: Vec<(f64, &str)> = Vec::new();
+fn overrepresented(group: &[&CaseResult], all: &[CaseResult]) -> String {
     let mut features: BTreeSet<&str> = BTreeSet::new();
     for case in group {
         features.extend(case.tags.iter().copied());
     }
+    let mut lifts: Vec<(f64, &str)> = Vec::new();
     for feature in features {
         let in_group = group.iter().filter(|case| case.tags.contains(feature)).count() as f64 / group.len() as f64;
         let overall = all.iter().filter(|case| case.tags.contains(feature)).count() as f64 / all.len() as f64;
@@ -36,173 +50,200 @@ fn overrepresented(group: &[&CaseResult], all: &[CaseResult]) -> Vec<String> {
         }
     }
     lifts.sort_by(|left, right| right.0.partial_cmp(&left.0).unwrap());
-    lifts.into_iter().take(4).map(|(lift, feature)| format!("{feature} (×{lift:.1})")).collect()
+    lifts.into_iter().take(4).map(|(lift, feature)| format!("{feature} (×{lift:.1})")).collect::<Vec<_>>().join(", ")
 }
 
-fn code(text: &str) -> String {
-    format!("```\n{}\n```\n", text)
-}
-
-fn example(out: &mut String, case: &CaseResult) {
-    if let Some(reduced) = &case.reduced {
-        let _ = writeln!(out, "Reduced (features: {}):", case.reduced_features.join(", "));
-        out.push_str(&code(reduced));
+fn example(out: &mut String, case: &CaseResult, engine: &str, reference: Option<&str>) {
+    if let Some(reduced) = case.reduced.get(engine) {
+        let _ = writeln!(out, "Reduced (features: {}):", reduced.features.join(", "));
+        out.push_str(&code(&reduced.query));
     }
-    let _ = writeln!(out, "Original GQL (case {}, {}):", case.id, case.phase);
-    out.push_str(&code(&case.gql));
-    if let Some(cypher) = &case.cypher {
-        let _ = writeln!(out, "Cypher:");
-        out.push_str(&code(cypher));
+    let _ = writeln!(out, "Original, as sent to {engine} (case {}, {}):", case.id, case.phase);
+    out.push_str(&code(case.queries.get(engine).unwrap_or(&case.gql)));
+    if let Some(reference) = reference {
+        if let Some(text) = case.queries.get(reference) {
+            let _ = writeln!(out, "As sent to {reference}:");
+            out.push_str(&code(text));
+        }
     }
 }
 
-pub fn markdown(cases: &[CaseResult], header: &str) -> String {
+fn escape(text: &str) -> String {
+    text.replace('|', "\\|").replace('`', "'")
+}
+
+pub fn markdown(cases: &[CaseResult], header: &str, engines: &[String], reference: Option<(&str, &Profile)>) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# graphfuzz report\n\n{header}\n");
+    let reference_name = reference.map(|(name, _)| name);
 
-    let mut totals: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut names: BTreeSet<&str> = BTreeSet::new();
     for case in cases {
-        *totals.entry(case.verdict.name()).or_default() += 1;
+        names.extend(case.verdicts.values().map(Verdict::name));
     }
-    let _ = writeln!(out, "## Verdicts\n\n| verdict | cases |\n|---|---|");
-    for (name, count) in &totals {
-        let _ = writeln!(out, "| {name} | {count} |");
+    let _ = writeln!(out, "## Verdicts\n\n| verdict | {} |\n|---|{}", engines.join(" | "), "---|".repeat(engines.len()));
+    for name in &names {
+        let counts: Vec<String> = engines
+            .iter()
+            .map(|engine| cases.iter().filter(|case| verdict(case, engine).map(Verdict::name) == Some(*name)).count().to_string())
+            .collect();
+        let _ = writeln!(out, "| {name} | {} |", counts.join(" | "));
+    }
+    let _ = writeln!(
+        out,
+        "\n`agree`: same rows as the reference. `rejects`: an error where the reference answered. `unchecked_*`: the reference cannot express the case. `unsupported`: the engine's dialect cannot."
+    );
+
+    for engine in engines {
+        engine_section(&mut out, cases, engine, reference_name);
     }
 
-    // Correctness first: wrong answers, crashes, internal errors.
-    let mismatches: Vec<&CaseResult> = cases.iter().filter(|case| matches!(case.verdict, Verdict::Mismatch { .. })).collect();
-    let _ = writeln!(out, "\n## Wrong answers: DuckGQL and Neo4j disagree ({})\n", mismatches.len());
-    let mut by_features: BTreeMap<String, Vec<&CaseResult>> = BTreeMap::new();
+    // Every feature, and how each engine fared with it.
+    let _ = writeln!(out, "\n## Features\n\nEach cell: agreed or passed / wrong / error / unsupported.\n");
+    let _ = writeln!(
+        out,
+        "| feature | {} | {} |\n|---|---|{}",
+        reference_name.map(|name| format!("in {name}?")).unwrap_or_else(|| "reference?".to_string()),
+        engines.join(" | "),
+        "---|".repeat(engines.len())
+    );
+    for (feature, description) in FEATURES {
+        let using: Vec<&CaseResult> = cases.iter().filter(|case| case.tags.contains(feature)).collect();
+        let in_reference = match reference {
+            Some((_, profile)) if profile.unsupported.iter().any(|name| name == feature) => "no",
+            Some(_) => "yes",
+            None => "",
+        };
+        let cells: Vec<String> = engines
+            .iter()
+            .map(|engine| {
+                let good = using.iter().filter(|case| matches!(verdict(case, engine), Some(Verdict::Agree | Verdict::TargetOnlyOk))).count();
+                let bad = using.iter().filter(|case| wrong(case, engine)).count();
+                let errors = using.iter().filter(|case| failure_message(case, engine).is_some()).count();
+                let unsupported = using.iter().filter(|case| matches!(verdict(case, engine), Some(Verdict::Unsupported(_)))).count();
+                format!("{good} / {bad} / {errors} / {unsupported}")
+            })
+            .collect();
+        let _ = writeln!(out, "| {feature} ({}) | {in_reference} | {} |", escape(description), cells.join(" | "));
+    }
+    out
+}
+
+fn engine_section(out: &mut String, cases: &[CaseResult], engine: &str, reference: Option<&str>) {
+    let _ = writeln!(out, "\n# {engine}\n");
+
+    let mismatches: Vec<&CaseResult> = cases.iter().filter(|case| matches!(verdict(case, engine), Some(Verdict::Mismatch { .. }))).collect();
+    let _ = writeln!(out, "## {engine}: wrong answers against {} ({})\n", reference.unwrap_or("the reference"), mismatches.len());
+    if !mismatches.is_empty() {
+        let _ = writeln!(out, "Over-represented features: {}\n", overrepresented(&mismatches, cases));
+    }
+    let mut groups: BTreeMap<String, Vec<&CaseResult>> = BTreeMap::new();
     for case in &mismatches {
-        let key = case.tags.iter().copied().collect::<Vec<_>>().join(", ");
-        by_features.entry(key).or_default().push(case);
+        let key = case.reduced.get(engine).map(|reduced| reduced.features.join(", ")).unwrap_or_else(|| case.tags.iter().copied().collect::<Vec<_>>().join(", "));
+        groups.entry(key).or_default().push(case);
     }
-    let mut groups: Vec<(&String, &Vec<&CaseResult>)> = by_features.iter().collect();
+    let mut groups: Vec<(String, Vec<&CaseResult>)> = groups.into_iter().collect();
     groups.sort_by_key(|(_, group)| std::cmp::Reverse(group.len()));
-    let _ = writeln!(out, "Features over-represented among wrong answers: {}\n", overrepresented(&mismatches, cases).join(", "));
-    for (_, group) in groups.iter().take(25) {
-        let case = shortest(group);
-        let _ = writeln!(out, "### {} case(s) using: {}\n", group.len(), case.tags.iter().copied().collect::<Vec<_>>().join(", "));
-        example(&mut out, case);
-        if let Verdict::Mismatch { duck, neo } = &case.verdict {
-            let _ = writeln!(out, "DuckGQL rows:");
-            out.push_str(&code(&duck.join("\n")));
-            let _ = writeln!(out, "Neo4j rows:");
-            out.push_str(&code(&neo.join("\n")));
+    for (features, group) in groups.iter().take(25) {
+        let case = representative(group, engine);
+        let _ = writeln!(out, "### {} case(s): {}\n", group.len(), features);
+        example(out, case, engine, reference);
+        if let Some(Verdict::Mismatch { target, reference: expected }) = verdict(case, engine) {
+            let _ = writeln!(out, "{engine} rows:");
+            out.push_str(&code(&target.join("\n")));
+            let _ = writeln!(out, "{} rows:", reference.unwrap_or("reference"));
+            out.push_str(&code(&expected.join("\n")));
         }
     }
 
-    let metamorphic: Vec<&CaseResult> = cases.iter().filter(|case| matches!(case.verdict, Verdict::Metamorphic { .. })).collect();
-    let _ = writeln!(out, "\n## Self-inconsistent DuckGQL answers ({})\n", metamorphic.len());
-    let mut by_oracle: BTreeMap<String, Vec<&CaseResult>> = BTreeMap::new();
-    for case in &metamorphic {
-        if let Verdict::Metamorphic { oracle, .. } = &case.verdict {
-            by_oracle.entry(oracle.clone()).or_default().push(case);
+    let metamorphic: Vec<&CaseResult> = cases.iter().filter(|case| matches!(verdict(case, engine), Some(Verdict::Metamorphic { .. }))).collect();
+    if !metamorphic.is_empty() {
+        let _ = writeln!(out, "\n## {engine}: answers that contradict each other ({})\n", metamorphic.len());
+        let mut by_oracle: BTreeMap<String, Vec<&CaseResult>> = BTreeMap::new();
+        for case in &metamorphic {
+            if let Some(Verdict::Metamorphic { oracle, .. }) = verdict(case, engine) {
+                by_oracle.entry(oracle.clone()).or_default().push(case);
+            }
         }
-    }
-    for (oracle, group) in &by_oracle {
-        let case = shortest(group);
-        let _ = writeln!(out, "### {oracle}: {} case(s); over-represented: {}\n", group.len(), overrepresented(group, cases).join(", "));
-        example(&mut out, case);
-        if let Verdict::Metamorphic { variant, detail, .. } = &case.verdict {
-            let _ = writeln!(out, "{detail}. Rewrite:");
-            out.push_str(&code(variant));
+        for (oracle, group) in &by_oracle {
+            let case = representative(group, engine);
+            let _ = writeln!(out, "### {oracle}: {} case(s); over-represented: {}\n", group.len(), overrepresented(group, cases));
+            example(out, case, engine, None);
+            if let Some(Verdict::Metamorphic { variant, detail, .. }) = verdict(case, engine) {
+                let _ = writeln!(out, "{detail}. Rewrite:");
+                out.push_str(&code(variant));
+            }
         }
     }
 
     // Features that fail on their own, over the base query.
-    let _ = writeln!(out, "\n## Features that fail alone\n\n| feature | Neo4j? | isolated cases | failing | minimal failing query | error |\n|---|---|---|---|---|---|");
+    let mut rows = Vec::new();
     for (feature, _) in FEATURES {
         let phase = format!("isolate:{feature}");
-        let isolated: Vec<&CaseResult> = cases.iter().filter(|case| case.phase == phase).collect();
-        let failing: Vec<&&CaseResult> = isolated.iter().filter(|case| failure_message(case).is_some() || matches!(case.verdict, Verdict::Mismatch { .. } | Verdict::Metamorphic { .. })).collect();
+        let isolated: Vec<&CaseResult> = cases.iter().filter(|case| case.phase == phase && case.verdicts.contains_key(engine)).collect();
+        let failing: Vec<&CaseResult> = isolated.iter().copied().filter(|case| failure_message(case, engine).is_some() || wrong(case, engine)).collect();
         if failing.is_empty() {
             continue;
         }
-        let shown = failing.iter().find(|case| case.reduced.is_some()).unwrap_or(&failing[0]);
-        let error = failure_message(shown).unwrap_or_else(|| shown.verdict.name().to_string());
-        let _ = writeln!(
-            out,
-            "| {feature} | {} | {} | {} | `{}` | `{}` |",
-            if GQL_ONLY.contains(feature) { "no" } else { "yes" },
-            isolated.len(),
-            failing.len(),
-            shown.reduced.as_deref().unwrap_or(&shown.gql).replace('|', "\\|"),
-            error.replace('|', "\\|")
-        );
+        let shown = representative(&failing, engine);
+        let error = failure_message(shown, engine).unwrap_or_else(|| verdict(shown, engine).map(Verdict::name).unwrap_or("").to_string());
+        let query = shown.reduced.get(engine).map(|reduced| reduced.query.clone()).unwrap_or_else(|| shown.queries.get(engine).cloned().unwrap_or_default());
+        rows.push(format!("| {feature} | {} | {} | `{}` | `{}` |", isolated.len(), failing.len(), escape(&query), escape(&error)));
+    }
+    if !rows.is_empty() {
+        let _ = writeln!(out, "\n## {engine}: features that fail alone\n\n| feature | isolated cases | failing | smallest failing query | error |\n|---|---|---|---|---|");
+        for row in rows {
+            let _ = writeln!(out, "{row}");
+        }
     }
 
-    // Then what DuckGQL cannot run, grouped by error.
     let mut by_signature: BTreeMap<String, Vec<&CaseResult>> = BTreeMap::new();
     for case in cases {
-        if let Some(message) = failure_message(case) {
+        if let Some(message) = failure_message(case, engine) {
             by_signature.entry(message).or_default().push(case);
         }
     }
-    let mut signatures: Vec<(&String, &Vec<&CaseResult>)> = by_signature.iter().collect();
+    let mut signatures: Vec<(String, Vec<&CaseResult>)> = by_signature.into_iter().collect();
     signatures.sort_by_key(|(_, group)| std::cmp::Reverse(group.len()));
-    let _ = writeln!(out, "\n## DuckGQL errors, by message ({} kinds)\n", signatures.len());
-    let _ = writeln!(out, "| cases | Neo4j ran it | message | over-represented features |\n|---|---|---|---|");
-    for (message, group) in &signatures {
-        let neo_ran = group.iter().filter(|case| matches!(case.verdict, Verdict::DuckRejects { .. })).count();
-        let _ = writeln!(out, "| {} | {} | `{}` | {} |", group.len(), neo_ran, message.replace('|', "\\|"), overrepresented(group, cases).join(", "));
-    }
-    for (message, group) in signatures.iter().take(40) {
-        let _ = writeln!(out, "\n### `{}`\n", message.replace('`', "'"));
-        example(&mut out, shortest(group));
+    if !signatures.is_empty() {
+        let _ = writeln!(out, "\n## {engine}: errors, by message ({} kinds)\n", signatures.len());
+        let _ = writeln!(out, "| cases | reference ran it | message | over-represented features |\n|---|---|---|---|");
+        for (message, group) in &signatures {
+            let reference_ran = group.iter().filter(|case| matches!(verdict(case, engine), Some(Verdict::TargetRejects { .. }))).count();
+            let _ = writeln!(out, "| {} | {} | `{}` | {} |", group.len(), reference_ran, escape(message), overrepresented(group, cases));
+        }
+        for (message, group) in signatures.iter().take(30) {
+            let _ = writeln!(out, "\n### `{}`\n", escape(message));
+            example(out, representative(group, engine), engine, reference);
+        }
     }
 
-    // Disagreements that are more likely the generator's or Neo4j's.
-    let neo_rejects: Vec<&CaseResult> = cases.iter().filter(|case| matches!(case.verdict, Verdict::NeoRejects { .. })).collect();
-    let mut neo_signatures: BTreeMap<String, Vec<&CaseResult>> = BTreeMap::new();
-    for case in &neo_rejects {
-        if let Verdict::NeoRejects { message } = &case.verdict {
-            neo_signatures.entry(signature(message)).or_default().push(case);
+    let rejected: Vec<&CaseResult> = cases.iter().filter(|case| matches!(verdict(case, engine), Some(Verdict::ReferenceRejects { .. }))).collect();
+    if !rejected.is_empty() {
+        let mut by_message: BTreeMap<String, Vec<&CaseResult>> = BTreeMap::new();
+        for case in &rejected {
+            if let Some(Verdict::ReferenceRejects { message }) = verdict(case, engine) {
+                by_message.entry(signature(message)).or_default().push(case);
+            }
         }
-    }
-    let _ = writeln!(out, "\n## Neo4j rejected what DuckGQL ran ({})\n", neo_rejects.len());
-    for (message, group) in &neo_signatures {
-        let _ = writeln!(out, "### {} case(s): `{}`\n", group.len(), message.replace('`', "'"));
-        example(&mut out, shortest(group));
-    }
-    let both: Vec<&CaseResult> = cases.iter().filter(|case| matches!(case.verdict, Verdict::BothReject { .. })).collect();
-    let mut both_signatures: BTreeMap<String, Vec<&CaseResult>> = BTreeMap::new();
-    for case in &both {
-        if let Verdict::BothReject { duck, neo } = &case.verdict {
-            both_signatures.entry(format!("{} / {}", signature(duck), signature(neo))).or_default().push(case);
+        let _ = writeln!(out, "\n## {engine}: the reference rejected what {engine} ran ({})\n", rejected.len());
+        for (message, group) in &by_message {
+            let _ = writeln!(out, "### {} case(s): `{}`\n", group.len(), escape(message));
+            example(out, representative(group, engine), engine, reference);
         }
-    }
-    let _ = writeln!(out, "\n## Both engines rejected ({})\n", both.len());
-    for (message, group) in both_signatures.iter().take(15) {
-        let _ = writeln!(out, "- {} case(s): `{}` e.g. `{}`", group.len(), message.replace('`', "'"), shortest(group).gql.replace('`', "'"));
     }
 
-    // Every feature: how often it ran and how it fared.
-    let _ = writeln!(out, "\n## Features\n\n| feature | Neo4j? | cases | agree/ok | wrong | DuckGQL error | most common DuckGQL error |\n|---|---|---|---|---|---|---|");
-    for (feature, description) in FEATURES {
-        let using: Vec<&CaseResult> = cases.iter().filter(|case| case.tags.contains(feature)).collect();
-        if using.is_empty() {
-            let _ = writeln!(out, "| {feature} ({description}) | | 0 | | | | |");
-            continue;
+    let both: Vec<&CaseResult> = cases.iter().filter(|case| matches!(verdict(case, engine), Some(Verdict::BothReject { .. }))).collect();
+    if !both.is_empty() {
+        let mut by_message: BTreeMap<String, usize> = BTreeMap::new();
+        for case in &both {
+            if let Some(Verdict::BothReject { target, reference }) = verdict(case, engine) {
+                *by_message.entry(format!("{} / {}", signature(target), signature(reference))).or_default() += 1;
+            }
         }
-        let good = using.iter().filter(|case| matches!(case.verdict, Verdict::Agree | Verdict::DuckOnlyOk)).count();
-        let wrong = using.iter().filter(|case| matches!(case.verdict, Verdict::Mismatch { .. } | Verdict::Metamorphic { .. })).count();
-        let errors: Vec<&&CaseResult> = using.iter().filter(|case| failure_message(case).is_some()).collect();
-        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-        for case in &errors {
-            *counts.entry(failure_message(case).unwrap()).or_default() += 1;
+        let _ = writeln!(out, "\n## {engine}: both rejected ({}), usually generator noise\n", both.len());
+        for (message, count) in by_message.iter().take(15) {
+            let _ = writeln!(out, "- {count}: `{}`", escape(message));
         }
-        let common = counts.iter().max_by_key(|(_, count)| **count).map(|(message, _)| message.replace('|', "\\|")).unwrap_or_default();
-        let _ = writeln!(
-            out,
-            "| {feature} ({description}) | {} | {} | {} | {} | {} | `{}` |",
-            if GQL_ONLY.contains(feature) { "no" } else { "yes" },
-            using.len(),
-            good,
-            wrong,
-            errors.len(),
-            common
-        );
     }
-    out
 }

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::engine::EngineConfig;
 use crate::generate::{FEATURES, GROUPS};
 
 #[derive(Deserialize, Debug, Clone)]
@@ -16,22 +17,16 @@ pub struct FileConfig {
     /// Where the report and the per-case results go, relative to the config file.
     pub out: PathBuf,
     pub timeout_ms: u64,
-    pub neo4j: Neo4jConfig,
+    /// The engine every other engine is compared against; none checks each engine against itself only.
+    pub reference: Option<String>,
+    /// The engines, by name.
+    pub engines: BTreeMap<String, EngineConfig>,
     pub phases: Phases,
     pub generator: GeneratorConfig,
     pub checks: Checks,
     /// The file as written, for the report.
     #[serde(skip)]
     pub raw: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
-#[serde(default, deny_unknown_fields)]
-pub struct Neo4jConfig {
-    pub enabled: bool,
-    pub url: String,
-    pub user: String,
-    pub password: String,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -77,7 +72,8 @@ impl Default for FileConfig {
             seed: 1,
             out: PathBuf::from("runs/latest"),
             timeout_ms: 10_000,
-            neo4j: Neo4jConfig::default(),
+            reference: Some("neo4j".to_string()),
+            engines: default_engines(),
             phases: Phases::default(),
             generator: GeneratorConfig::default(),
             checks: Checks::default(),
@@ -86,15 +82,13 @@ impl Default for FileConfig {
     }
 }
 
-impl Default for Neo4jConfig {
-    fn default() -> Self {
-        Neo4jConfig {
-            enabled: true,
-            url: "http://localhost:7474".to_string(),
-            user: "neo4j".to_string(),
-            password: "graphfuzz123".to_string(),
-        }
-    }
+/// Neo4j in a local container as the reference, and DuckGQL under test.
+fn default_engines() -> BTreeMap<String, EngineConfig> {
+    let text = "
+neo4j: {connector: neo4j_http, dialect: cypher25, url: 'http://localhost:7474', user: neo4j, password: graphfuzz123, allow_wipe: true}
+duckgql: {connector: duckgql, dialect: gql, metamorphic: true}
+";
+    serde_yaml::from_str(text).expect("the default engines")
 }
 
 impl Default for Phases {
@@ -154,6 +148,12 @@ impl FileConfig {
         config.weights()?;
         for feature in &config.phases.isolate_features {
             expand(feature)?;
+        }
+        if let Some(reference) = &config.reference {
+            match config.engines.get(reference) {
+                Some(engine) if engine.enabled => {}
+                _ => bail!("the reference engine '{reference}' is not an enabled engine"),
+            }
         }
         if !(0.0..=1.0).contains(&config.generator.mutation_share) {
             bail!("generator.mutation_share must be between 0 and 1");

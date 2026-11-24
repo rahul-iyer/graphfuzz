@@ -1,73 +1,80 @@
-//! Prints the AST as ISO GQL, or as Cypher 25 for Neo4j. A construct Neo4j has no counterpart for makes
-//! the Cypher printer give up, and the query is then checked against DuckGQL alone.
+//! Prints the AST in a dialect profile's syntax. Whether a dialect can express a query is decided from the
+//! query's features and the profile's unsupported list; this module only spells what it is given.
+
+use std::sync::OnceLock;
 
 use crate::ast::*;
+use crate::profile::{Profile, Quantifier};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Dialect {
-    Gql,
-    Cypher,
+/// The built-in GQL profile, for reports and for DuckGQL.
+pub fn gql_profile() -> &'static Profile {
+    static GQL: OnceLock<Profile> = OnceLock::new();
+    GQL.get_or_init(|| Profile::load("gql", std::path::Path::new("."), &[], &[], None).expect("the built-in GQL profile"))
 }
 
 pub fn gql(query: &Query) -> String {
-    let mut printer = Printer { dialect: Dialect::Gql, supported: true };
-    printer.query(query)
+    render(query, gql_profile())
 }
 
-pub fn cypher(query: &Query) -> Option<String> {
-    let mut printer = Printer { dialect: Dialect::Cypher, supported: true };
-    let text = printer.query(query);
-    printer.supported.then(|| format!("CYPHER 25 {text}"))
+pub fn render(query: &Query, profile: &Profile) -> String {
+    let mut printer = Printer { profile, scope: false };
+    format!("{}{}", profile.prefix, printer.query(query))
 }
 
-struct Printer {
-    dialect: Dialect,
-    supported: bool,
+struct Printer<'a> {
+    profile: &'a Profile,
+    /// Whether the clauses so far bound a variable, which `WITH *` needs.
+    scope: bool,
 }
 
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-impl Printer {
-    fn gql(&self) -> bool {
-        self.dialect == Dialect::Gql
-    }
-
-    /// Marks the query as GQL-only when printing Cypher.
-    fn gql_only(&mut self) {
-        if !self.gql() {
-            self.supported = false;
-        }
+impl Printer<'_> {
+    fn with_style(&self) -> bool {
+        self.profile.syntax.linear_as_with
     }
 
     fn query(&mut self, query: &Query) -> String {
         match query {
-            Query::Linear(linear) => self.linear(linear),
+            Query::Linear(linear) => {
+                self.scope = false;
+                self.linear(linear)
+            }
             Query::Composite(left, op, right) => {
                 let op = match op {
                     SetOp::Union => "UNION",
                     SetOp::UnionAll => "UNION ALL",
-                    SetOp::Except => {
-                        self.gql_only();
-                        "EXCEPT"
-                    }
-                    SetOp::ExceptAll => {
-                        self.gql_only();
-                        "EXCEPT ALL"
-                    }
-                    SetOp::Intersect => {
-                        self.gql_only();
-                        "INTERSECT"
-                    }
-                    SetOp::Otherwise => {
-                        self.gql_only();
-                        "OTHERWISE"
-                    }
+                    SetOp::Except => "EXCEPT",
+                    SetOp::ExceptAll => "EXCEPT ALL",
+                    SetOp::Intersect => "INTERSECT",
+                    SetOp::Otherwise => "OTHERWISE",
                 };
-                format!("{} {} {}", self.query(left), op, self.query(right))
+                let left = self.query(left);
+                let right = self.query(right);
+                format!("{left} {op} {right}")
             }
-            Query::Next(parts) => parts.iter().map(|part| self.linear(part)).collect::<Vec<_>>().join(" NEXT "),
+            Query::Next(parts) => {
+                self.scope = false;
+                let mut printed = Vec::new();
+                for (index, part) in parts.iter().enumerate() {
+                    let last = index + 1 == parts.len();
+                    if self.with_style() && !last {
+                        // The statement's result becomes the next statement's input: RETURN becomes WITH.
+                        let mut text = part.clauses.iter().map(|clause| self.clause(clause)).collect::<Vec<_>>().join(" ");
+                        if let Tail::Return(ret) = &part.tail {
+                            text.push(' ');
+                            text.push_str(&self.return_statement(ret).replacen("RETURN", "WITH", 1));
+                        }
+                        printed.push(text);
+                        self.scope = true;
+                    } else {
+                        printed.push(self.linear(part));
+                    }
+                }
+                printed.join(if self.with_style() { " " } else { " NEXT " })
+            }
         }
     }
 
@@ -81,6 +88,11 @@ impl Printer {
         parts.join(" ")
     }
 
+    /// `WITH *`, or `WITH` when nothing is bound yet.
+    fn with_all(&self) -> &'static str {
+        if self.scope { "WITH *," } else { "WITH" }
+    }
+
     fn clause(&mut self, clause: &Clause) -> String {
         match clause {
             Clause::Match { optional, mode, paths, filter } => {
@@ -91,7 +103,10 @@ impl Printer {
                 text.push_str("MATCH ");
                 match mode {
                     Some(MatchMode::RepeatableElements) => text.push_str("REPEATABLE ELEMENTS "),
-                    Some(MatchMode::DifferentEdges) => text.push_str(if self.gql() { "DIFFERENT EDGES " } else { "DIFFERENT RELATIONSHIPS " }),
+                    Some(MatchMode::DifferentEdges) => {
+                        text.push_str(&self.profile.syntax.different_edges);
+                        text.push(' ');
+                    }
                     None => {}
                 }
                 let paths: Vec<String> = paths.iter().map(|path| self.path(path)).collect();
@@ -100,28 +115,48 @@ impl Printer {
                     text.push_str(" WHERE ");
                     text.push_str(&self.expr(filter));
                 }
+                self.scope = true;
                 text
             }
             Clause::Let(bindings) => {
-                let items: Vec<String> = bindings.iter().map(|(name, value)| format!("{} = {}", name, self.expr(value))).collect();
-                format!("LET {}", items.join(", "))
-            }
-            Clause::For { var, list, position } => {
-                let mut text = format!("FOR {} IN {}", var, self.expr(list));
-                if let Some((offset, name)) = position {
-                    self.gql_only();
-                    text.push_str(&format!(" WITH {} {}", if *offset { "OFFSET" } else { "ORDINALITY" }, name));
-                }
+                let text = if self.with_style() {
+                    let items: Vec<String> = bindings.iter().map(|(name, value)| format!("{} AS {}", self.expr(value), name)).collect();
+                    let with = if self.scope { "WITH *, " } else { "WITH " };
+                    format!("{with}{}", items.join(", "))
+                } else {
+                    let items: Vec<String> = bindings.iter().map(|(name, value)| format!("{} = {}", name, self.expr(value))).collect();
+                    format!("LET {}", items.join(", "))
+                };
+                self.scope = true;
                 text
             }
-            Clause::Filter(condition) => format!("FILTER {}", self.expr(condition)),
+            Clause::For { var, list, position } => {
+                let text = if self.with_style() {
+                    format!("UNWIND {} AS {}", self.expr(list), var)
+                } else {
+                    let mut text = format!("FOR {} IN {}", var, self.expr(list));
+                    if let Some((offset, name)) = position {
+                        text.push_str(&format!(" WITH {} {}", if *offset { "OFFSET" } else { "ORDINALITY" }, name));
+                    }
+                    text
+                };
+                self.scope = true;
+                text
+            }
+            Clause::Filter(condition) => {
+                if self.with_style() {
+                    format!("WITH * WHERE {}", self.expr(condition))
+                } else {
+                    format!("FILTER {}", self.expr(condition))
+                }
+            }
             Clause::OrderPage { order, offset, limit } => {
-                let mut text = String::new();
+                let mut text = if self.with_style() { "WITH * ".to_string() } else { String::new() };
                 if !order.is_empty() {
                     text.push_str(&self.order(order));
                 }
                 if let Some(offset) = offset {
-                    text.push_str(&format!(" OFFSET {offset}"));
+                    text.push_str(&format!(" {} {offset}", self.profile.syntax.offset));
                 }
                 if let Some(limit) = limit {
                     text.push_str(&format!(" LIMIT {limit}"));
@@ -134,18 +169,24 @@ impl Printer {
                     text.push_str("OPTIONAL ");
                 }
                 text.push_str("CALL ");
-                if let Some(scope) = scope {
-                    text.push_str(&format!("({}) ", scope.join(", ")));
-                } else if !self.gql() {
-                    // Cypher 25 needs a scope clause; `*` imports every variable, as GQL's bare CALL does.
-                    text.push_str("(*) ");
+                match scope {
+                    Some(scope) => text.push_str(&format!("({}) ", scope.join(", "))),
+                    None if !self.profile.syntax.call_all.is_empty() => {
+                        text.push_str(&self.profile.syntax.call_all);
+                        text.push(' ');
+                    }
+                    None => {}
                 }
-                text.push_str(&format!("{{ {} }}", self.query(body)));
+                let outer = self.scope;
+                let body = self.query(body).trim_start_matches(self.profile.prefix.as_str()).to_string();
+                self.scope = outer;
+                text.push_str(&format!("{{ {body} }}"));
                 text
             }
             Clause::Insert(paths) => {
                 let paths: Vec<String> = paths.iter().map(|path| self.path(path)).collect();
-                format!("INSERT {}", paths.join(", "))
+                self.scope = true;
+                format!("{} {}", self.profile.syntax.insert, paths.join(", "))
             }
             Clause::Set(items) => {
                 let items: Vec<String> = items
@@ -195,10 +236,7 @@ impl Printer {
             Some(PathMode::Walk) => text.push_str("WALK "),
             Some(PathMode::Trail) => text.push_str("TRAIL "),
             Some(PathMode::Acyclic) => text.push_str("ACYCLIC "),
-            Some(PathMode::Simple) => {
-                self.gql_only();
-                text.push_str("SIMPLE ");
-            }
+            Some(PathMode::Simple) => text.push_str("SIMPLE "),
             None => {}
         }
         text.push_str(&self.node(&path.start));
@@ -209,12 +247,13 @@ impl Printer {
         text
     }
 
-    fn filler(&mut self, var: &Option<String>, label: &Option<LabelExpr>, props: &[(String, Expr)], filter: &Option<Expr>) -> String {
+    fn filler(&mut self, var: &Option<String>, label: &Option<LabelExpr>, quantifier: &str, props: &[(String, Expr)], filter: &Option<Expr>) -> String {
         let mut text = var.clone().unwrap_or_default();
         if let Some(label) = label {
             text.push(':');
             text.push_str(&self.label(label));
         }
+        text.push_str(quantifier);
         if !props.is_empty() {
             text.push(' ');
             text.push_str(&self.map(props));
@@ -227,53 +266,67 @@ impl Printer {
     }
 
     fn node(&mut self, node: &NodePat) -> String {
-        format!("({})", self.filler(&node.var, &node.label, &node.props, &node.filter))
+        format!("({})", self.filler(&node.var, &node.label, "", &node.props, &node.filter))
     }
 
     fn edge(&mut self, edge: &EdgePat) -> String {
-        let filler = self.filler(&edge.var, &edge.label, &edge.props, &edge.filter);
+        let star = self.profile.syntax.quantifier == Quantifier::Star;
+        let inner = match (edge.quant, star) {
+            (Some(Quant::Fixed(count)), true) => format!("*{count}"),
+            (Some(Quant::Range(low, high)), true) => format!("*{low}..{high}"),
+            (Some(Quant::Plus), true) => "*1..".to_string(),
+            (Some(Quant::Star), true) => "*0..".to_string(),
+            _ => String::new(),
+        };
+        let filler = self.filler(&edge.var, &edge.label, &inner, &edge.props, &edge.filter);
         let (open, close) = match edge.dir {
             Dir::Right => ("-[", "]->"),
             Dir::Left => ("<-[", "]-"),
             Dir::Any => ("-[", "]-"),
+            // Only directed edges either way; a language whose edges are all directed writes that as any direction.
             Dir::LeftOrRight => {
-                if self.gql() {
+                if self.profile.name == "gql" {
                     ("<-[", "]->")
                 } else {
-                    // Every Neo4j relationship is directed, so either direction is any direction.
                     ("-[", "]-")
                 }
             }
-            Dir::Undirected => {
-                self.gql_only();
-                ("~[", "]~")
-            }
-            Dir::LeftOrUndirected => {
-                self.gql_only();
-                ("<~[", "]~")
-            }
-            Dir::UndirectedOrRight => {
-                self.gql_only();
-                ("~[", "]~>")
-            }
+            Dir::Undirected => ("~[", "]~"),
+            Dir::LeftOrUndirected => ("<~[", "]~"),
+            Dir::UndirectedOrRight => ("~[", "]~>"),
         };
-        let quant = match edge.quant {
-            Some(Quant::Fixed(count)) => format!("{{{count}}}"),
-            Some(Quant::Range(low, high)) => format!("{{{low},{high}}}"),
-            Some(Quant::Plus) => "+".to_string(),
-            Some(Quant::Star) => "*".to_string(),
-            None => String::new(),
+        let quant = match (edge.quant, star) {
+            (Some(Quant::Fixed(count)), false) => format!("{{{count}}}"),
+            (Some(Quant::Range(low, high)), false) => format!("{{{low},{high}}}"),
+            (Some(Quant::Plus), false) => "+".to_string(),
+            (Some(Quant::Star), false) => "*".to_string(),
+            _ => String::new(),
         };
         format!("{open}{filler}{close}{quant}")
     }
 
     fn label(&mut self, label: &LabelExpr) -> String {
+        let colon = self.profile.syntax.labeled == "colon";
         match label {
             LabelExpr::Name(name) => name.clone(),
+            // openCypher writes a conjunction of labels as :A:B.
+            LabelExpr::And(left, right) if colon => format!("{}:{}", self.label(left), self.label(right)),
+            LabelExpr::Or(left, right) if colon => format!("{}|{}", self.label(left), self.label(right)),
             LabelExpr::And(left, right) => format!("({}&{})", self.label(left), self.label(right)),
             LabelExpr::Or(left, right) => format!("({}|{})", self.label(left), self.label(right)),
             LabelExpr::Not(inner) => format!("!{}", self.label(inner)),
             LabelExpr::Wildcard => "%".to_string(),
+        }
+    }
+
+    /// n IS LABELED expr as a boolean over n:A tests, for languages without IS LABELED.
+    fn label_test(&mut self, var: &str, label: &LabelExpr) -> String {
+        match label {
+            LabelExpr::Name(name) => format!("{var}:{name}"),
+            LabelExpr::And(left, right) => format!("({} AND {})", self.label_test(var, left), self.label_test(var, right)),
+            LabelExpr::Or(left, right) => format!("({} OR {})", self.label_test(var, left), self.label_test(var, right)),
+            LabelExpr::Not(inner) => format!("(NOT {})", self.label_test(var, inner)),
+            LabelExpr::Wildcard => "true".to_string(),
         }
     }
 
@@ -286,7 +339,7 @@ impl Printer {
                     text.push_str(" DESC");
                 }
                 // Neo4j puts nulls last going up and first going down; GQL says so explicitly.
-                if self.gql() {
+                if self.profile.syntax.explicit_nulls {
                     text.push_str(if item.desc { " NULLS FIRST" } else { " NULLS LAST" });
                 }
                 text
@@ -301,10 +354,7 @@ impl Printer {
             text.push_str("DISTINCT ");
         }
         match &ret.items {
-            ReturnItems::Star => {
-                self.gql_only();
-                text.push('*');
-            }
+            ReturnItems::Star => text.push('*'),
             ReturnItems::Items(items) => {
                 let items: Vec<String> = items
                     .iter()
@@ -324,7 +374,7 @@ impl Printer {
             text.push_str(&self.order(&ret.order));
         }
         if let Some(offset) = ret.offset {
-            text.push_str(&format!(" OFFSET {offset}"));
+            text.push_str(&format!(" {} {offset}", self.profile.syntax.offset));
         }
         if let Some(limit) = ret.limit {
             text.push_str(&format!(" LIMIT {limit}"));
@@ -335,9 +385,8 @@ impl Printer {
     fn literal(&mut self, literal: &Lit) -> String {
         match literal {
             Lit::Int(value) => value.to_string(),
-            // GQL reads 1.5 as exact; the exponent makes it approximate, like Cypher's 1.5.
             Lit::Float(value) => {
-                if self.gql() {
+                if self.profile.syntax.float_exponent {
                     format!("{value:?}E0")
                 } else {
                     format!("{value:?}")
@@ -346,20 +395,8 @@ impl Printer {
             Lit::Str(value) => quote(value),
             Lit::Bool(value) => value.to_string().to_uppercase(),
             Lit::Null => "NULL".to_string(),
-            Lit::Date(value) => {
-                if self.gql() {
-                    format!("DATE {}", quote(value))
-                } else {
-                    format!("date({})", quote(value))
-                }
-            }
-            Lit::Duration(value) => {
-                if self.gql() {
-                    format!("DURATION {}", quote(value))
-                } else {
-                    format!("duration({})", quote(value))
-                }
-            }
+            Lit::Date(value) => format!("DATE {}", quote(value)),
+            Lit::Duration(value) => format!("DURATION {}", quote(value)),
         }
     }
 
@@ -375,7 +412,7 @@ impl Printer {
                     BinOp::Sub => "-",
                     BinOp::Mul => "*",
                     BinOp::Div => "/",
-                    BinOp::Concat => "||",
+                    BinOp::Concat => self.profile.syntax.concat.as_str(),
                     BinOp::Eq => "=",
                     BinOp::Ne => "<>",
                     BinOp::Lt => "<",
@@ -385,7 +422,8 @@ impl Printer {
                     BinOp::And => "AND",
                     BinOp::Or => "OR",
                     BinOp::Xor => "XOR",
-                };
+                }
+                .to_string();
                 format!("({} {} {})", self.expr(left), symbol, self.expr(right))
             }
             Expr::Not(inner) => format!("(NOT {})", self.expr(inner)),
@@ -397,11 +435,12 @@ impl Printer {
                     Some(arg) => format!("{}{}", if *distinct { "DISTINCT " } else { "" }, self.expr(arg)),
                     None => "*".to_string(),
                 };
-                match (name.as_str(), self.dialect) {
-                    ("collect_list", Dialect::Cypher) => format!("collect({argument})"),
-                    // Neo4j's sum of no values is 0; ISO GQL's is NULL.
-                    ("sum", Dialect::Cypher) => format!("CASE count({argument}) WHEN 0 THEN NULL ELSE sum({argument}) END"),
-                    _ => format!("{name}({argument})"),
+                let function = self.profile.function(name).to_string();
+                if name == "sum" && self.profile.syntax.sum_empty_is_zero {
+                    // GQL's sum of no values is NULL.
+                    format!("CASE count({argument}) WHEN 0 THEN NULL ELSE {function}({argument}) END")
+                } else {
+                    format!("{function}({argument})")
                 }
             }
             Expr::Case(arms, otherwise) => {
@@ -430,16 +469,13 @@ impl Printer {
                 let items: Vec<String> = items.iter().map(|item| self.expr(item)).collect();
                 format!("[{}]", items.join(", "))
             }
-            Expr::Index(list, index) => {
-                self.gql_only();
-                format!("{}[{}]", self.expr(list), self.expr(index))
-            }
+            Expr::Index(list, index) => format!("{}[{}]", self.expr(list), self.expr(index)),
             Expr::Record(fields) => {
                 let fields: Vec<String> = fields.iter().map(|(name, value)| format!("{}: {}", name, self.expr(value))).collect();
                 format!("{{{}}}", fields.join(", "))
             }
             Expr::Cast(inner, ty) => {
-                if self.gql() {
+                if self.profile.syntax.cast == "gql" {
                     format!("CAST({} AS {})", self.expr(inner), ty)
                 } else {
                     let function = match ty.as_str() {
@@ -451,28 +487,23 @@ impl Printer {
                     format!("{}({})", function, self.expr(inner))
                 }
             }
-            Expr::Labeled(var, label, negated) => format!("({} IS {}LABELED {})", var, if *negated { "NOT " } else { "" }, self.label(label)),
+            Expr::Labeled(var, label, negated) => {
+                if self.profile.syntax.labeled == "colon" {
+                    let test = self.label_test(var, label);
+                    if *negated { format!("(NOT {test})") } else { format!("({test})") }
+                } else {
+                    format!("({} IS {}LABELED {})", var, if *negated { "NOT " } else { "" }, self.label(label))
+                }
+            }
             Expr::Typed(inner, ty, negated) => format!("({} IS {}TYPED {})", self.expr(inner), if *negated { "NOT " } else { "" }, ty),
             Expr::Normalized(inner, negated) => format!("({} IS {}NORMALIZED)", self.expr(inner), if *negated { "NOT " } else { "" }),
             Expr::Directed(var, negated) => format!("({} IS {}DIRECTED)", var, if *negated { "NOT " } else { "" }),
-            Expr::SourceOf(node, edge, negated) => {
-                self.gql_only();
-                format!("({} IS {}SOURCE OF {})", node, if *negated { "NOT " } else { "" }, edge)
-            }
-            Expr::DestinationOf(node, edge, negated) => {
-                self.gql_only();
-                format!("({} IS {}DESTINATION OF {})", node, if *negated { "NOT " } else { "" }, edge)
-            }
-            Expr::AllDifferent(vars) => {
-                self.gql_only();
-                format!("ALL_DIFFERENT({})", vars.join(", "))
-            }
-            Expr::Same(vars) => {
-                self.gql_only();
-                format!("SAME({})", vars.join(", "))
-            }
+            Expr::SourceOf(node, edge, negated) => format!("({} IS {}SOURCE OF {})", node, if *negated { "NOT " } else { "" }, edge),
+            Expr::DestinationOf(node, edge, negated) => format!("({} IS {}DESTINATION OF {})", node, if *negated { "NOT " } else { "" }, edge),
+            Expr::AllDifferent(vars) => format!("ALL_DIFFERENT({})", vars.join(", ")),
+            Expr::Same(vars) => format!("SAME({})", vars.join(", ")),
             Expr::PropertyExists(var, prop) => {
-                if self.gql() {
+                if self.profile.syntax.property_exists == "function" {
                     format!("PROPERTY_EXISTS({var}, {prop})")
                 } else {
                     format!("({var}.{prop} IS NOT NULL)")
@@ -498,13 +529,18 @@ impl Printer {
 
     fn function(&mut self, name: &str, args: &[Expr]) -> String {
         let printed: Vec<String> = args.iter().map(|arg| self.expr(arg)).collect();
-        match (name, self.dialect) {
-            ("mod", Dialect::Cypher) => format!("({} % {})", printed[0], printed[1]),
-            ("power", Dialect::Cypher) => format!("({} ^ {})", printed[0], printed[1]),
-            ("element_id", Dialect::Cypher) => format!("elementId({})", printed[0]),
-            ("nullif", Dialect::Cypher) => format!("nullIf({})", printed.join(", ")),
-            ("size", Dialect::Gql) => format!("SIZE({})", printed[0]),
-            _ => format!("{}({})", name, printed.join(", ")),
+        if let Some(operator) = self.profile.syntax.operators.get(name) {
+            return format!("({} {} {})", printed[0], operator, printed[1]);
         }
+        if name == "nullif" {
+            return if self.profile.syntax.nullif == "case" {
+                format!("CASE WHEN {} = {} THEN NULL ELSE {} END", printed[0], printed[1], printed[0])
+            } else {
+                format!("{}({})", self.profile.syntax.nullif, printed.join(", "))
+            };
+        }
+        let function = self.profile.function(name);
+        let function = if self.profile.name == "gql" && name == "size" { "SIZE" } else { function };
+        format!("{}({})", function, printed.join(", "))
     }
 }

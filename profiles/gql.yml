@@ -1,0 +1,21 @@
+# ISO GQL, as DuckGQL runs it.
+name: gql
+prefix: ""
+unsupported: []
+syntax:
+  quantifier: braces          # -[:K]->{1,3}
+  concat: "||"
+  float_exponent: true        # 1.5 is exact in GQL; 1.5E0 is approximate
+  explicit_nulls: true        # ORDER BY x NULLS LAST
+  insert: INSERT
+  offset: OFFSET
+  linear_as_with: false
+  call_all: ""                # CALL { ... } imports every variable
+  different_edges: DIFFERENT EDGES
+  sum_empty_is_zero: false
+  nullif: nullif
+  property_exists: function
+  cast: gql
+  labeled: gql                # n IS LABELED A
+  functions: {}
+  operators: {}

@@ -1,0 +1,37 @@
+# Cypher 25 as Neo4j 2026.10 runs it: much of GQL, with Cypher's names for some functions.
+name: cypher25
+prefix: "CYPHER 25 "
+unsupported:
+  - edge_undirected
+  - edge_left_or_undirected
+  - edge_undirected_or_right
+  - path_simple
+  - source_of
+  - all_different
+  - same
+  - cast
+  - except
+  - intersect
+  - otherwise
+  - return_star
+  - for_ordinality
+  - for_offset
+  # Neo4j 2026.10 answers false for its relationships, which are all directed.
+  - is_directed
+syntax:
+  quantifier: braces
+  concat: "||"
+  float_exponent: false
+  explicit_nulls: false       # ascending puts NULLs last, descending first
+  insert: INSERT
+  offset: OFFSET
+  linear_as_with: false
+  call_all: "(*)"
+  different_edges: DIFFERENT RELATIONSHIPS
+  sum_empty_is_zero: true
+  nullif: nullIf
+  property_exists: is_not_null
+  cast: functions
+  labeled: gql
+  functions: {collect_list: collect, element_id: elementId}
+  operators: {mod: "%", power: "^"}

@@ -91,6 +91,7 @@ pub struct FixtureEdge {
 }
 
 pub struct Fixture {
+    pub seed: u64,
     pub nodes: Vec<FixtureNode>,
     pub edges: Vec<FixtureEdge>,
 }
@@ -193,7 +194,7 @@ impl Schema {
         let mut rng = Rng::new(seed ^ 0x5eed_f1c7_0000_0001);
         let names = ["Ada", "Bob", "Cy", "Dee", "Eve", "Fay", "Gus", "Hal", "Ivy", "Jo", "Kim", "Lu"];
         let counts = [("Person", 12i64), ("City", 5), ("Company", 4)];
-        let mut fixture = Fixture { nodes: Vec::new(), edges: Vec::new() };
+        let mut fixture = Fixture { seed, nodes: Vec::new(), edges: Vec::new() };
         for (label, count) in counts {
             for id in 1..=count {
                 let mut props = vec![("id", FixtureValue::Int(id))];

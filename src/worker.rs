@@ -1,13 +1,15 @@
-//! DuckGQL runs in a worker process, so a crash or a hang in the engine costs one query, not the run.
-//! The parent sends JSON requests on the worker's stdin and reads JSON responses from its stdout.
+//! Embedded engines run in a worker process, so a crash or a hang in an engine costs one query, not the
+//! run. The parent sends JSON requests on the worker's stdin and reads JSON responses from its stdout;
+//! `graphfuzz worker <backend>` is the worker.
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::value::{Row, Val};
@@ -44,28 +46,14 @@ pub enum RunOutcome {
     Timeout,
 }
 
-/// The worker's loop: each request runs on one in-memory database, statement by statement.
-pub fn worker_main() -> Result<()> {
-    let connection = duckdb::Connection::open_in_memory()?;
+/// Answers requests, running each statement with `run`.
+fn serve(mut run: impl FnMut(&Statement, Duration) -> StatementResult) -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
         let request: Request = serde_json::from_str(&line?)?;
-        let mut results = Vec::new();
-        for statement in &request.statements {
-            let interrupt = connection.interrupt_handle();
-            let (done, finished) = channel::<()>();
-            let timeout = Duration::from_millis(request.timeout_ms);
-            // Stops a statement that runs past its timeout; the parent kills the worker if this fails.
-            let timer = thread::spawn(move || {
-                if let Err(RecvTimeoutError::Timeout) = finished.recv_timeout(timeout) {
-                    interrupt.interrupt();
-                }
-            });
-            results.push(run_statement(&connection, statement));
-            let _ = done.send(());
-            let _ = timer.join();
-        }
+        let timeout = Duration::from_millis(request.timeout_ms);
+        let results = request.statements.iter().map(|statement| run(statement, timeout)).collect();
         serde_json::to_writer(&mut stdout, &Response { results })?;
         stdout.write_all(b"\n")?;
         stdout.flush()?;
@@ -73,7 +61,47 @@ pub fn worker_main() -> Result<()> {
     Ok(())
 }
 
-fn run_statement(connection: &duckdb::Connection, statement: &Statement) -> StatementResult {
+/// The worker's main loop for one backend.
+pub fn worker_main(backend: &str, path: Option<PathBuf>) -> Result<()> {
+    match backend {
+        "duckgql" => {
+            let connection = duckdb::Connection::open_in_memory()?;
+            serve(|statement, timeout| {
+                let interrupt = connection.interrupt_handle();
+                let (done, finished) = channel::<()>();
+                // Stops a statement that runs past its timeout; the parent kills the worker if this fails.
+                let timer = thread::spawn(move || {
+                    if let Err(RecvTimeoutError::Timeout) = finished.recv_timeout(timeout) {
+                        interrupt.interrupt();
+                    }
+                });
+                let result = run_duckdb(&connection, statement);
+                let _ = done.send(());
+                let _ = timer.join();
+                result
+            })
+        }
+        "ladybug" => {
+            let path = path.context("the Ladybug worker needs a database path")?;
+            // Every worker starts from an empty database, which the parent then loads.
+            if path.exists() {
+                std::fs::remove_dir_all(&path).or_else(|_| std::fs::remove_file(&path)).ok();
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let database = lbug::Database::new(&path, lbug::SystemConfig::default())?;
+            let connection = lbug::Connection::new(&database)?;
+            serve(|statement, timeout| {
+                connection.set_query_timeout(timeout.as_millis() as u64);
+                run_ladybug(&connection, statement)
+            })
+        }
+        other => bail!("unknown worker backend '{other}'"),
+    }
+}
+
+fn run_duckdb(connection: &duckdb::Connection, statement: &Statement) -> StatementResult {
     if !statement.read {
         return match connection.execute_batch(&statement.sql) {
             Ok(()) => StatementResult::Done,
@@ -88,8 +116,8 @@ fn run_statement(connection: &duckdb::Connection, statement: &Statement) -> Stat
         Ok(rows) => rows,
         Err(error) => return StatementResult::Error(error.to_string()),
     };
-    let mut result = Vec::new();
     let columns: Vec<String> = rows.as_ref().map(|statement| statement.column_names()).unwrap_or_default();
+    let mut result = Vec::new();
     loop {
         match rows.next() {
             Ok(Some(row)) => {
@@ -109,28 +137,68 @@ fn run_statement(connection: &duckdb::Connection, statement: &Statement) -> Stat
     StatementResult::Rows { columns, rows: result }
 }
 
+fn run_ladybug(connection: &lbug::Connection, statement: &Statement) -> StatementResult {
+    match connection.query(&statement.sql) {
+        Ok(result) => {
+            if !statement.read {
+                return StatementResult::Done;
+            }
+            let columns = result.get_column_names();
+            let rows = result.map(|row| row.into_iter().map(ladybug_value).collect()).collect();
+            StatementResult::Rows { columns, rows }
+        }
+        Err(error) => StatementResult::Error(error.to_string()),
+    }
+}
+
+fn ladybug_value(value: lbug::Value) -> Val {
+    use lbug::Value as L;
+    match value {
+        L::Null(_) => Val::Null,
+        L::Bool(value) => Val::Bool(value),
+        L::Int64(value) => Val::Num(value as f64),
+        L::Int32(value) => Val::Num(value as f64),
+        L::Int16(value) => Val::Num(value as f64),
+        L::Int8(value) => Val::Num(value as f64),
+        L::UInt64(value) => Val::Num(value as f64),
+        L::UInt32(value) => Val::Num(value as f64),
+        L::UInt16(value) => Val::Num(value as f64),
+        L::UInt8(value) => Val::Num(value as f64),
+        L::Int128(value) => Val::Num(value as f64),
+        L::Double(value) => Val::Num(value),
+        L::Float(value) => Val::Num(value as f64),
+        L::Decimal(value) => Val::Num(value.to_string().parse().unwrap_or(f64::NAN)),
+        L::String(text) => Val::Str(text),
+        L::List(_, items) | L::Array(_, items) => Val::List(items.into_iter().map(ladybug_value).collect()),
+        L::Struct(fields) => Val::Map(fields.into_iter().map(|(name, value)| (name, ladybug_value(value))).collect()),
+        other => Val::Other(format!("{other}")),
+    }
+}
+
 /// The parent's handle on a worker, restarted with the setup statements after a crash or a hang.
-pub struct Duck {
+pub struct Worker {
+    args: Vec<String>,
     setup: Vec<Statement>,
     timeout: Duration,
     child: Option<(Child, ChildStdin, Receiver<String>)>,
     pub restarts: usize,
 }
 
-impl Duck {
-    pub fn new(setup: Vec<Statement>, timeout: Duration) -> Duck {
-        Duck { setup, timeout, child: None, restarts: 0 }
+impl Worker {
+    pub fn new(args: Vec<String>, setup: Vec<Statement>, timeout: Duration) -> Worker {
+        Worker { args, setup, timeout, child: None, restarts: 0 }
     }
 
     fn start(&mut self) -> Result<()> {
         let exe = std::env::current_exe()?;
         let mut child = Command::new(exe)
             .arg("worker")
+            .args(&self.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .context("starting the DuckGQL worker")?;
+            .context("starting an engine worker")?;
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (lines, receiver) = channel();
@@ -148,14 +216,16 @@ impl Duck {
         });
         self.child = Some((child, stdin, receiver));
         let setup = self.setup.clone();
-        match self.send(&setup, Duration::from_secs(120))? {
+        match self.send(&setup, Duration::from_secs(300))? {
             RunOutcome::Results(results) => {
-                if let Some(StatementResult::Error(error)) = results.iter().find(|result| matches!(result, StatementResult::Error(_))) {
-                    anyhow::bail!("DuckGQL fixture setup failed: {error}");
+                for (statement, result) in setup.iter().zip(&results) {
+                    if let StatementResult::Error(error) = result {
+                        bail!("{} fixture setup failed: {error}\n{}", self.args.join(" "), statement.sql);
+                    }
                 }
                 Ok(())
             }
-            other => anyhow::bail!("DuckGQL fixture setup did not finish: {other:?}"),
+            other => bail!("{} fixture setup did not finish: {other:?}", self.args.join(" ")),
         }
     }
 
@@ -208,7 +278,7 @@ impl Duck {
     }
 }
 
-impl Drop for Duck {
+impl Drop for Worker {
     fn drop(&mut self) {
         self.stop();
     }

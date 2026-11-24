@@ -10,6 +10,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 # Links the libduckdb that DUCKDB_LIB_DIR names, so it can be a DuckDB build with extensions linked in.
 duckdb = { version = "=1.20000.2" }
+lbug = "0.22.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"

@@ -1,0 +1,60 @@
+# openCypher 9, the dialect most Cypher endpoints share (Ladybug, Neptune, Memgraph, ...). An engine
+# entry in config.yml lists what its engine adds or lacks, and may override any syntax setting.
+name: opencypher
+prefix: ""
+unsupported:
+  - edge_undirected
+  - edge_left_or_undirected
+  - edge_undirected_or_right
+  - label_or
+  - label_not
+  - label_wildcard
+  - element_where
+  - any_shortest
+  - all_shortest
+  - shortest_k
+  - shortest_k_groups
+  - any_k
+  - path_trail
+  - path_acyclic
+  - path_simple
+  - path_walk
+  - match_repeatable
+  - match_different
+  - for_ordinality
+  - for_offset
+  - inline_call
+  - optional_call
+  - call_no_scope
+  - except
+  - intersect
+  - otherwise
+  - finish
+  - return_star
+  - group_by
+  - cast
+  - is_typed
+  - is_normalized
+  - is_directed
+  - source_of
+  - all_different
+  - same
+  - exists_pattern
+  - exists_match
+syntax:
+  quantifier: star            # -[:K*1..3]->
+  concat: "+"
+  float_exponent: false
+  explicit_nulls: false
+  insert: CREATE
+  offset: SKIP
+  linear_as_with: true        # LET, FILTER, NEXT, and paging before RETURN become WITH
+  call_all: ""
+  different_edges: ""
+  sum_empty_is_zero: true
+  nullif: case
+  property_exists: is_not_null
+  cast: functions
+  labeled: colon              # n:A
+  functions: {collect_list: collect, element_id: id, path_length: length, upper: toUpper, lower: toLower, char_length: size, ln: log}
+  operators: {mod: "%", power: "^"}

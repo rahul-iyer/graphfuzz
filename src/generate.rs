@@ -246,28 +246,9 @@ const MUTATIONS: &[&str] = &[
     "next_set",
 ];
 
-/// Features Neo4j 2026.10 has no counterpart for.
-pub const GQL_ONLY: &[&str] = &[
-    "edge_undirected",
-    "edge_left_or_undirected",
-    "edge_undirected_or_right",
-    "path_simple",
-    "source_of",
-    // Neo4j 2026.10 answers false for its relationships, which are all directed.
-    "is_directed",
-    "all_different",
-    "same",
-    "cast",
-    "except",
-    "intersect",
-    "otherwise",
-    "return_star",
-    "div",
-    "for_ordinality",
-    "for_offset",
-    // Neo4j checks a deleted node's relationships at commit, and every case here is rolled back.
-    "delete_attached",
-];
+/// Features whose answers ISO GQL leaves to the implementation, so engines may differ without either being
+/// wrong: exact division, and deleting a node that still has edges (checked at commit by some engines).
+pub const IMPLEMENTATION_DEFINED: &[&str] = &["div", "delete_attached"];
 
 #[derive(Clone, Debug)]
 pub enum Kind {
@@ -285,8 +266,8 @@ pub struct Var {
 }
 
 pub struct Config {
-    /// Avoid constructs whose meaning GQL leaves to the implementation, so DuckGQL and Neo4j must agree.
-    pub comparable: bool,
+    /// Features never generated: those the reference cannot express or that are implementation-defined.
+    pub exclude: BTreeSet<&'static str>,
     pub undirected: bool,
     /// Turn on only this feature, over the base every query uses.
     pub isolate: Option<String>,
@@ -330,7 +311,7 @@ impl<'a> Gen<'a> {
     /// Whether to use a feature here. In an isolation run only the isolated feature is ever used.
     fn want(&mut self, feature: &str, probability: f64) -> bool {
         let feature = feature_name(feature);
-        if self.config.comparable && GQL_ONLY.contains(&feature) {
+        if self.config.exclude.contains(feature) {
             return false;
         }
         if !self.config.undirected && feature.contains("undirected") {

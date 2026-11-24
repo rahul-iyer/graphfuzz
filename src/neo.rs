@@ -7,7 +7,7 @@ use anyhow::Result;
 use base64::Engine;
 use serde_json::{Value, json};
 
-use crate::duck::StatementResult;
+use crate::worker::StatementResult;
 use crate::value::Val;
 
 /// The error code of a request that did not reach Neo4j or whose answer could not be read.

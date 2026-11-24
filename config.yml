@@ -10,12 +10,44 @@ out: runs/latest
 # How long one statement may run before it is interrupted (milliseconds).
 timeout_ms: 10000
 
-neo4j:
-  # Compare against Neo4j. Without it, DuckGQL is checked against itself only (metamorphic checks).
-  enabled: true
-  url: http://localhost:7474
-  user: neo4j
-  password: graphfuzz123
+# The engine every other engine is compared against. Remove it to check each engine against itself only.
+reference: neo4j
+
+# Each engine: a connector (how to reach it) and a dialect (how to write queries for it). A dialect is a
+# built-in profile (gql, cypher25, opencypher; see profiles/) or a profile file. `supported` and
+# `unsupported` adjust the profile's feature list for this engine; `syntax` overrides its syntax settings.
+engines:
+  neo4j:
+    connector: neo4j_http
+    dialect: cypher25
+    url: http://localhost:7474
+    user: neo4j
+    password: graphfuzz123
+    # Loading the fixture deletes everything in the database.
+    allow_wipe: true
+
+  duckgql:
+    connector: duckgql          # the DuckGQL libduckdb that .cargo/config.toml links
+    dialect: gql
+    # Also check answers against rewrites that must not change them.
+    metamorphic: true
+
+  ladybug:
+    connector: ladybug          # embedded, through the lbug crate
+    dialect: opencypher
+    path: runs/ladybug.lbdb     # recreated at the start of every run
+    supported: [label_or, exists_match]
+
+  # Amazon Neptune, or any endpoint that takes form-encoded openCypher over HTTP. It has no transactions,
+  # so data-modifying cases are skipped. IAM-authenticated clusters need a signing proxy (headers can carry
+  # other credentials).
+  # neptune:
+  #   connector: opencypher_http
+  #   dialect: opencypher
+  #   url: https://my-cluster.cluster-xxxx.us-east-1.neptune.amazonaws.com:8182/openCypher
+  #   headers: {}
+  #   allow_wipe: false         # must be true to load the fixture, which deletes all data
+  #   enabled: false
 
 phases:
   # Queries per feature with only that feature on, over a fixed base query.
