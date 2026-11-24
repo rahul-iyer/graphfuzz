@@ -58,6 +58,8 @@ phases:
   compare: 1000
   # Random queries that may use GQL-only features, checked on DuckGQL alone.
   explore: 400
+  # Run the configured grammars' systematic sentences (see grammars: below).
+  grammar: true
 
 generator:
   # The share of random queries that modify data (run in a transaction that is rolled back).
@@ -86,3 +88,71 @@ checks:
   reduce: true
   # Variants tried per reduction.
   reduce_budget: 150
+
+# Grammars whose every choice is tried: each alternative of each rule, each optional element present and
+# absent, each repetition 0, 1, and 2 times, and with `coverage: pairs` each alternative of every rule an
+# alternative uses. Each choice gets the shortest sentence that makes it, run in a rolled-back transaction.
+grammars:
+  gql:
+    file: grammars/gql/GQL.g4         # OpenGQL's ANTLR grammar for ISO/IEC 39075, as DuckGQL vendors it
+    start: gqlProgram
+    coverage: pairs
+    engines: [duckgql]
+    # Default to MATCH ... RETURN with integer literals, so sentences exercise queries rather than DELETE.
+    prefer:
+      statement: 0                      # compositeQueryStatement
+      linearQueryStatement: 1           # ambientLinearQueryStatement
+      ambientLinearQueryStatement: 0
+      primitiveResultStatement: 0       # RETURN
+      primitiveQueryStatement: 0        # MATCH
+      valueExpression: 14               # primaryExprAlt
+      valueExpressionPrimary: 2         # unsignedValueSpecification
+      nonParenthesizedValueExpressionPrimarySpecialCase: 1
+      unsignedValueSpecification: 0
+      unsignedLiteral: 0
+      unsignedNumericLiteral: 0
+      exactNumericLiteral: 4            # an unsigned integer
+    vocabulary:
+      bindingVariable: [n, m, e, p]
+      labelName: [Person, City, KNOWS, LIVES_IN]
+      propertyName: [id, name, age, since]
+      fieldName: [id, name]
+      graphName: [fuzz]
+      graphTypeName: [fuzz_type]
+      nodeTypeName: [Person]
+      edgeTypeName: [KNOWS]
+      schemaName: [main]
+      directoryName: [main]
+      objectName: [fuzz]
+      objectNameOrBindingVariable: [n]
+      bindingTableName: [t]
+      procedureName: [shortest_path]
+      subpathVariable: [q]
+      localNodeTypeAlias: [Person]
+      sourceNodeTypeAlias: [Person]
+      destinationNodeTypeAlias: [Person]
+      regularIdentifier: [x]
+      SINGLE_QUOTED_CHARACTER_SEQUENCE: ["'Ada'"]
+      DOUBLE_QUOTED_CHARACTER_SEQUENCE: ['"Ada"']
+      ACCENT_QUOTED_CHARACTER_SEQUENCE: ['`Ada`']
+      UNSIGNED_DECIMAL_INTEGER: ["1", "2"]
+
+  opencypher:
+    file: grammars/opencypher/Cypher.g4   # openCypher 9 (M23), from artifacts.opencypher.org
+    start: oC_Cypher
+    separator: auto                     # a space only where tokens would run together; SP spells the rest
+    coverage: pairs
+    engines: [neo4j, ladybug]
+    prefer:
+      oC_SinglePartQuery: 0             # RETURN, not DELETE, when nothing forces a clause
+    vocabulary:
+      SP: [" "]
+      oC_Variable: [n, m, e, p]
+      oC_LabelName: [Person, City]
+      oC_RelTypeName: [KNOWS, LIVES_IN]
+      oC_PropertyKeyName: [id, name, age, since]
+      oC_FunctionName: [abs, toUpper, size, coalesce]
+      oC_ProcedureName: [db.labels]
+      oC_SymbolicName: [x]
+      StringLiteral: ["'Ada'"]
+      DecimalInteger: ["1", "2"]

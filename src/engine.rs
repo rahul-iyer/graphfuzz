@@ -52,6 +52,8 @@ pub trait Engine {
     fn transactional(&self) -> bool;
     /// Runs a data modification and then the digest queries in one transaction, and rolls it back.
     fn rolled_back(&mut self, mutation: &str, digests: &[String]) -> Result<Vec<Outcome>>;
+    /// Runs any statement, reading its rows if it has any, in a transaction that is rolled back.
+    fn sandboxed(&mut self, statement: &str) -> Result<Outcome>;
     /// Chooses the graph with an undirected edge type, for engines that hold one.
     fn use_undirected(&mut self, _undirected: bool) {}
     fn restarts(&self) -> usize {
@@ -186,6 +188,16 @@ impl Engine for DuckGql {
         Ok(outcomes[2..count - 1].to_vec())
     }
 
+    fn sandboxed(&mut self, statement: &str) -> Result<Outcome> {
+        let statements = vec![
+            Statement { sql: format!("SESSION SET GRAPH {}", self.graph), read: false },
+            Statement { sql: "BEGIN".to_string(), read: false },
+            Statement { sql: statement.to_string(), read: true },
+            Statement { sql: "ROLLBACK".to_string(), read: false },
+        ];
+        Ok(worker_outcomes(self.worker.as_mut().unwrap().run(&statements)?, 4).remove(2))
+    }
+
     fn use_undirected(&mut self, undirected: bool) {
         self.graph = if undirected { "fuzzu" } else { "fuzz" };
     }
@@ -250,6 +262,15 @@ impl Engine for Ladybug {
         Ok(outcomes[1..count - 1].to_vec())
     }
 
+    fn sandboxed(&mut self, statement: &str) -> Result<Outcome> {
+        let statements = vec![
+            Statement { sql: "BEGIN TRANSACTION".to_string(), read: false },
+            Statement { sql: statement.to_string(), read: true },
+            Statement { sql: "ROLLBACK".to_string(), read: false },
+        ];
+        Ok(worker_outcomes(self.worker.as_mut().unwrap().run(&statements)?, 3).remove(1))
+    }
+
     fn restarts(&self) -> usize {
         self.worker.as_ref().map(|worker| worker.restarts).unwrap_or(0)
     }
@@ -283,6 +304,10 @@ impl Engine for Neo4jHttp {
         let mut statements = vec![mutation.to_string()];
         statements.extend(digests.iter().cloned());
         Ok(self.neo.run_rolled_back(&statements)?.into_iter().map(Outcome::from_statement).collect())
+    }
+
+    fn sandboxed(&mut self, statement: &str) -> Result<Outcome> {
+        Ok(self.neo.run_rolled_back(&[statement.to_string()])?.into_iter().map(Outcome::from_statement).next().unwrap_or(Outcome::Done))
     }
 }
 
@@ -349,5 +374,10 @@ impl Engine for OpenCypherHttp {
 
     fn rolled_back(&mut self, _mutation: &str, _digests: &[String]) -> Result<Vec<Outcome>> {
         bail!("openCypher over HTTP has no transactions to roll back")
+    }
+
+    fn sandboxed(&mut self, _statement: &str) -> Result<Outcome> {
+        // A grammar's sentences may modify data, which this endpoint could not undo.
+        Ok(Outcome::Transport("no transactions to contain arbitrary sentences".to_string()))
     }
 }

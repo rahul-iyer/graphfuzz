@@ -27,6 +27,25 @@ Each case is run on the reference and on every engine whose dialect can express 
 cannot express are checked with rewrites that must not change an answer (partitioning a filter, reversing
 paths, `count(*)`, `DISTINCT`) on engines with `metamorphic: true`.
 
+## Grammars
+
+`grammars/` holds the official grammars: OpenGQL's `GQL.g4` for ISO/IEC 39075 (as DuckGQL vendors it) and
+openCypher 9's `Cypher.g4` (milestone M23, from artifacts.opencypher.org). graphfuzz reads ANTLR 4 grammars
+itself and tries every choice they offer: each alternative of each rule, each optional element present and
+absent, each repetition 0, 1, and 2 times, and (`coverage: pairs`) each alternative of every rule an
+alternative uses. Each choice gets the shortest sentence that makes it; a failure counts against the choice
+only when the sentence without it (its baseline) does not fail the same way. Sentences run in rolled-back
+transactions, the fixture is checked for drift, and engines that answer the same sentence are compared.
+
+A grammar in `config.yml` names its file, start rule, engines, a vocabulary (fixture names, numbers, and
+strings in place of derived identifiers and literals), and `prefer`, the alternatives to take when no choice
+is forced, so sentences start from `MATCH ... RETURN` rather than the shortest statement.
+
+```sh
+./target/release/graphfuzz sentences --config config.yml --grammar gql --count 30   # targets and sentences
+./target/release/graphfuzz grammar --config config.yml                              # grammar.md, grammar.jsonl
+```
+
 ## Setup
 
 - DuckGQL: `.cargo/config.toml` links the DuckGQL build's `libduckdb` (`DUCKDB_LIB_DIR`).

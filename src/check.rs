@@ -91,13 +91,15 @@ pub struct CaseResult {
 
 pub fn classify(message: &str) -> ErrorKind {
     let lower = message.to_lowercase();
-    if message.contains("INTERNAL Error") || lower.contains("internal error") || lower.contains("assertion") {
+    let any = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+    if message.contains("INTERNAL Error") || any(&["internal error", "assertion"]) {
         ErrorKind::Internal
-    } else if lower.contains("not implemented") || lower.contains("not supported") || lower.contains("unsupported") {
+    } else if any(&["not implemented", "not supported", "unsupported"]) {
         ErrorKind::NotImplemented
-    } else if lower.contains("parser") || lower.contains("syntax") {
+    } else if any(&["invalid input", "mismatched input", "no viable alternative", "extraneous input", "syntax error at or near", "parser error", "parser exception"]) {
         ErrorKind::Parser
-    } else if lower.contains("binder") {
+    } else if any(&["binder", "type mismatch", "not defined", "semanticerror", "statement.syntaxerror"]) {
+        // Neo4j files type and scoping errors under SyntaxError; only "Invalid input" is a syntax error.
         ErrorKind::Binder
     } else {
         ErrorKind::Runtime

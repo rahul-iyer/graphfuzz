@@ -5,9 +5,12 @@
 mod ast;
 mod check;
 mod config;
+mod derive;
 mod engine;
 mod features;
+mod g4;
 mod generate;
+mod grammar_run;
 mod neo;
 mod profile;
 mod reduce;
@@ -79,6 +82,20 @@ enum Command {
         #[arg(long)]
         engines: Option<String>,
     },
+    /// Run only the configured grammars' systematic sentences.
+    Grammar {
+        #[arg(long, default_value = "config.yml")]
+        config: PathBuf,
+    },
+    /// Show a configured grammar's coverage targets and the sentences that make them, without running them.
+    Sentences {
+        #[arg(long, default_value = "config.yml")]
+        config: PathBuf,
+        #[arg(long)]
+        grammar: String,
+        #[arg(long, default_value_t = 20)]
+        count: usize,
+    },
     #[command(hide = true)]
     Worker {
         backend: String,
@@ -122,6 +139,42 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Run { config } => run(&config),
+        Command::Grammar { config } => {
+            let file = FileConfig::load(Some(&config))?;
+            fs::create_dir_all(&file.out)?;
+            let schema = Schema::social(false);
+            let mut slots = connect_all(&file, &config, &schema)?;
+            grammar_run::run_grammars(&file, &mut slots, &schema, &file.out)
+        }
+        Command::Sentences { config, grammar, count } => {
+            let file = FileConfig::load(Some(&config))?;
+            let Some(settings) = file.grammars.get(&grammar) else { bail!("no grammar named {grammar} in the configuration") };
+            let parsed = g4::Grammar::load(&settings.file)?;
+            let start = settings.start.clone().unwrap_or_else(|| parsed.order[0].clone());
+            let deriver = derive::Deriver::new(&parsed, &start, &settings.separator, &settings.vocabulary, &settings.prefer);
+            let targets = deriver.targets(settings.coverage);
+            let parser_rules = parsed.rules.values().filter(|rule| !rule.lexer).count();
+            let reachable = parsed.rules.keys().filter(|name| !parsed.rules[*name].lexer && deriver.reachable(name)).count();
+            println!("{}: {} parser rules (with lifted groups), {} reachable from {}, {} targets", parsed.name, parser_rules, reachable, start, targets.len());
+            let mut seen = BTreeSet::new();
+            let mut covered = BTreeSet::new();
+            let mut sentences = 0;
+            for target in &targets {
+                if covered.contains(target) {
+                    continue;
+                }
+                let sentence = deriver.sentence(target);
+                covered.extend(sentence.covered.iter().cloned());
+                if seen.insert(sentence.text.clone()) {
+                    if sentences < count {
+                        println!("{:60} {}", target.describe(&parsed), sentence.text);
+                    }
+                    sentences += 1;
+                }
+            }
+            println!("{} distinct sentences cover {} of {} targets", sentences, targets.iter().filter(|target| covered.contains(*target)).count(), targets.len());
+            Ok(())
+        }
         Command::Repro { config, gql, cypher, engines } => {
             let file = FileConfig::load(Some(&config))?;
             let only: Option<BTreeSet<String>> = engines.map(|names| names.split(',').map(|name| name.trim().to_string()).collect());
@@ -285,6 +338,12 @@ fn run(config_path: &Path) -> Result<()> {
     let markdown = report::markdown(&results, &header, &target_names, reference_profile);
     fs::write(file.out.join("report.md"), &markdown)?;
     eprintln!("wrote {} and {}", file.out.join("report.md").display(), file.out.join("results.jsonl").display());
+    if file.phases.grammar && !file.grammars.is_empty() {
+        for slot in slots.iter_mut() {
+            slot.engine.use_undirected(false);
+        }
+        grammar_run::run_grammars(&file, &mut slots, &compared, &file.out)?;
+    }
     Ok(())
 }
 

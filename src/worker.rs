@@ -83,12 +83,16 @@ pub fn worker_main(backend: &str, path: Option<PathBuf>) -> Result<()> {
         }
         "ladybug" => {
             let path = path.context("the Ladybug worker needs a database path")?;
-            // Every worker starts from an empty database, which the parent then loads.
-            if path.exists() {
-                std::fs::remove_dir_all(&path).or_else(|_| std::fs::remove_file(&path)).ok();
-            }
-            if let Some(parent) = path.parent() {
+            // Every worker starts from an empty database, which the parent then loads. The write-ahead log and
+            // other files beside it belong to the old database and must go too.
+            if let (Some(parent), Some(name)) = (path.parent(), path.file_name().and_then(|name| name.to_str())) {
                 std::fs::create_dir_all(parent)?;
+                for entry in std::fs::read_dir(parent)?.flatten() {
+                    if entry.file_name().to_str().is_some_and(|file| file == name || file.starts_with(&format!("{name}."))) {
+                        let stale = entry.path();
+                        std::fs::remove_dir_all(&stale).or_else(|_| std::fs::remove_file(&stale)).ok();
+                    }
+                }
             }
             let database = lbug::Database::new(&path, lbug::SystemConfig::default())?;
             let connection = lbug::Connection::new(&database)?;
@@ -110,6 +114,13 @@ fn run_duckdb(connection: &duckdb::Connection, statement: &Statement) -> Stateme
     }
     let mut prepared = match connection.prepare(&statement.sql) {
         Ok(prepared) => prepared,
+        // A GQL statement that becomes several SQL statements runs as a batch, with no rows to read.
+        Err(error) if error.to_string().contains("multiple statements") => {
+            return match connection.execute_batch(&statement.sql) {
+                Ok(()) => StatementResult::Done,
+                Err(error) => StatementResult::Error(error.to_string()),
+            };
+        }
         Err(error) => return StatementResult::Error(error.to_string()),
     };
     let mut rows = match prepared.query([]) {
@@ -171,6 +182,19 @@ fn ladybug_value(value: lbug::Value) -> Val {
         L::String(text) => Val::Str(text),
         L::List(_, items) | L::Array(_, items) => Val::List(items.into_iter().map(ladybug_value).collect()),
         L::Struct(fields) => Val::Map(fields.into_iter().map(|(name, value)| (name, ladybug_value(value))).collect()),
+        L::Node(node) => Val::node(
+            vec![node.get_label_name().clone()],
+            node.get_properties().iter().map(|(name, value)| (name.clone(), ladybug_value(value.clone()))).collect(),
+        ),
+        L::Rel(rel) => Val::relationship(
+            rel.get_label_name(),
+            rel.get_properties().iter().map(|(name, value)| (name.clone(), ladybug_value(value.clone()))).collect(),
+        ),
+        L::RecursiveRel { rels, .. } => Val::path(
+            rels.iter()
+                .map(|rel| Val::relationship(rel.get_label_name(), rel.get_properties().iter().map(|(name, value)| (name.clone(), ladybug_value(value.clone()))).collect()))
+                .collect(),
+        ),
         other => Val::Other(format!("{other}")),
     }
 }
@@ -196,7 +220,8 @@ impl Worker {
             .args(&self.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // An engine that fails to start says why on stderr.
+            .stderr(Stdio::inherit())
             .spawn()
             .context("starting an engine worker")?;
         let stdin = child.stdin.take().unwrap();

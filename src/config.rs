@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::derive::Coverage;
 use crate::engine::EngineConfig;
 use crate::generate::{FEATURES, GROUPS};
 
@@ -24,6 +25,8 @@ pub struct FileConfig {
     pub phases: Phases,
     pub generator: GeneratorConfig,
     pub checks: Checks,
+    /// Grammars to derive sentences from systematically, by name.
+    pub grammars: BTreeMap<String, GrammarConfig>,
     /// The file as written, for the report.
     #[serde(skip)]
     pub raw: String,
@@ -40,6 +43,8 @@ pub struct Phases {
     pub compare: usize,
     /// Random queries that may use GQL-only features, checked on DuckGQL alone.
     pub explore: usize,
+    /// Run the configured grammars' systematic sentences.
+    pub grammar: bool,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -77,6 +82,7 @@ impl Default for FileConfig {
             phases: Phases::default(),
             generator: GeneratorConfig::default(),
             checks: Checks::default(),
+            grammars: BTreeMap::new(),
             raw: String::new(),
         }
     }
@@ -93,7 +99,7 @@ duckgql: {connector: duckgql, dialect: gql, metamorphic: true}
 
 impl Default for Phases {
     fn default() -> Self {
-        Phases { isolate: 6, isolate_features: Vec::new(), compare: 1000, explore: 400 }
+        Phases { isolate: 6, isolate_features: Vec::new(), compare: 1000, explore: 400, grammar: true }
     }
 }
 
@@ -107,6 +113,46 @@ impl Default for Checks {
     fn default() -> Self {
         Checks { metamorphic: true, reduce: true, reduce_budget: 150 }
     }
+}
+
+/// A grammar whose every choice is tried: each target gets the shortest sentence that makes it.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct GrammarConfig {
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// The ANTLR 4 grammar file, relative to config.yml.
+    pub file: PathBuf,
+    /// The start rule; the grammar's first parser rule when omitted.
+    #[serde(default)]
+    pub start: Option<String>,
+    /// Text between tokens. openCypher spells its whitespace in the grammar, so it takes "".
+    #[serde(default = "space")]
+    pub separator: String,
+    #[serde(default)]
+    pub coverage: Coverage,
+    /// The engines its sentences run on; they are compared with each other where several answer.
+    pub engines: Vec<String>,
+    /// Text for rules and tokens instead of derivations: names from the fixture, numbers, strings.
+    #[serde(default)]
+    pub vocabulary: BTreeMap<String, Vec<String>>,
+    /// The alternative (by index, from 0) a rule takes when nothing forces a choice; the cheapest otherwise.
+    #[serde(default)]
+    pub prefer: BTreeMap<String, usize>,
+    /// The most sentences to run; 0 runs one for every target.
+    #[serde(default)]
+    pub limit: usize,
+    /// Text put before every sentence, as `CYPHER 5 ` to pick a Neo4j language version.
+    #[serde(default)]
+    pub prefix: String,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn space() -> String {
+    " ".to_string()
 }
 
 /// How the generator weighs features, with group names expanded to their features.
@@ -146,6 +192,16 @@ impl FileConfig {
             config.out = path.parent().unwrap_or(Path::new(".")).join(&config.out);
         }
         config.weights()?;
+        for (name, grammar) in &mut config.grammars {
+            if grammar.file.is_relative() {
+                grammar.file = path.parent().unwrap_or(Path::new(".")).join(&grammar.file);
+            }
+            for engine in &grammar.engines {
+                if !config.engines.contains_key(engine) {
+                    bail!("grammar {name} runs on engine '{engine}', which is not configured");
+                }
+            }
+        }
         for feature in &config.phases.isolate_features {
             expand(feature)?;
         }
