@@ -2,17 +2,36 @@
 name = "graphfuzz"
 version = "0.1.0"
 edition = "2024"
-description = "Generates graph queries as ISO GQL and Cypher, runs them on DuckGQL and Neo4j, and reports where they disagree"
+description = "Differential and metamorphic fuzzer for GQL and Cypher graph query engines"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rahul-iyer/graphfuzz"
+readme = "README.md"
+keywords = ["fuzzing", "gql", "cypher", "graph-database", "testing"]
+categories = ["development-tools::testing", "database"]
+publish = false
+
+[features]
+default = ["ladybug"]
+# DuckGQL through a libduckdb that links the duckgql extension; see .cargo/config.toml.example.
+duckgql = ["dep:duckdb"]
+# Ladybug, embedded through the lbug crate.
+ladybug = ["dep:lbug"]
 
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 # Links the libduckdb that DUCKDB_LIB_DIR names, so it can be a DuckDB build with extensions linked in.
-duckdb = { version = "=1.20000.2" }
-lbug = "0.22.3"
+duckdb = { version = "=1.20000.2", optional = true }
+lbug = { version = "0.22.3", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 time = "0.3"
 ureq = { version = "3", features = ["json"] }
+
+[lints.clippy]
+# Recursive generators and printers pass their context explicitly, and index parallel lists.
+too_many_arguments = "allow"
+type_complexity = "allow"
+needless_range_loop = "allow"

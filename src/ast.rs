@@ -1,5 +1,9 @@
 //! A query AST covering the shared core of ISO GQL and Cypher. Printers in `render` turn it into
 //! either dialect; constructs one dialect lacks are never generated for it.
+//!
+//! The AST and its printers cover more of both languages than the generator produces yet (parameters,
+//! EXCEPT ALL, explicit NULLS ordering, ...), so some variants are only ever matched on.
+#![allow(dead_code)]
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dir {
@@ -165,7 +169,11 @@ pub enum Expr {
     IsNull(Box<Expr>, bool),
     /// A function written name(args): GQL and Cypher spell some names differently, see render.
     Func(String, Vec<Expr>),
-    Agg { name: String, distinct: bool, arg: Option<Box<Expr>> },
+    Agg {
+        name: String,
+        distinct: bool,
+        arg: Option<Box<Expr>>,
+    },
     /// CASE WHEN c THEN v ... ELSE e END
     Case(Vec<(Expr, Expr)>, Option<Box<Expr>>),
     /// CASE operand WHEN v THEN r ... END
@@ -226,12 +234,6 @@ pub enum Clause {
     Delete { detach: bool, vars: Vec<String> },
 }
 
-impl Clause {
-    pub fn modifies(&self) -> bool {
-        matches!(self, Clause::Insert(_) | Clause::Set(_) | Clause::Remove(_) | Clause::Delete { .. })
-    }
-}
-
 #[derive(Clone, Debug)]
 pub enum ReturnItems {
     Star,
@@ -277,14 +279,4 @@ pub enum Query {
     Composite(Box<Query>, SetOp, Box<Query>),
     /// Statements chained with NEXT; each but the first reads the previous one's columns.
     Next(Vec<Linear>),
-}
-
-impl Query {
-    pub fn modifies(&self) -> bool {
-        match self {
-            Query::Linear(linear) => linear.clauses.iter().any(Clause::modifies),
-            Query::Composite(left, _, right) => left.modifies() || right.modifies(),
-            Query::Next(parts) => parts.iter().any(|part| part.clauses.iter().any(Clause::modifies)),
-        }
-    }
 }

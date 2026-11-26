@@ -20,7 +20,10 @@ use crate::worker::{RunOutcome, Statement, StatementResult, Worker};
 /// What one statement did.
 #[derive(Clone, Debug)]
 pub enum Outcome {
-    Rows { columns: Vec<String>, rows: Vec<Row> },
+    Rows {
+        columns: Vec<String>,
+        rows: Vec<Row>,
+    },
     Done,
     Error(String),
     Crash(String),
@@ -108,6 +111,16 @@ fn enabled() -> bool {
     true
 }
 
+/// Whether this build includes a connector; the embedded engines are cargo features.
+#[allow(clippy::match_like_matches_macro)] // which arms are constant depends on the features
+pub fn compiled_in(connector: &str) -> bool {
+    match connector {
+        "duckgql" => cfg!(feature = "duckgql"),
+        "ladybug" => cfg!(feature = "ladybug"),
+        _ => true,
+    }
+}
+
 pub fn connect(name: &str, config: &EngineConfig, base: &std::path::Path, timeout: Duration) -> Result<Box<dyn Engine>> {
     Ok(match config.connector.as_str() {
         "duckgql" => Box::new(DuckGql { worker: None, timeout, graph: "fuzz" }),
@@ -118,7 +131,9 @@ pub fn connect(name: &str, config: &EngineConfig, base: &std::path::Path, timeou
         "neo4j_http" => {
             require_wipe(name, config)?;
             let url = config.url.clone().unwrap_or_else(|| "http://localhost:7474".to_string());
-            let neo = Neo::new(&url, config.user.as_deref().unwrap_or("neo4j"), config.password.as_deref().unwrap_or(""), timeout * 3);
+            // A password left out of config.yml is read from NEO4J_PASSWORD.
+            let password = config.password.clone().or_else(|| std::env::var("NEO4J_PASSWORD").ok()).unwrap_or_default();
+            let neo = Neo::new(&url, config.user.as_deref().unwrap_or("neo4j"), &password, timeout * 3);
             Box::new(Neo4jHttp { neo })
         }
         "opencypher_http" => {
@@ -178,8 +193,7 @@ impl Engine for DuckGql {
             // the element ids the inserts allocate in order.
             statements.extend(fixture.statements(|value| !value.temporal()).iter().map(|query| render::render(query, profile)));
             let mut update = |table: &str, key: &str, index: usize, props: &[(&'static str, Lit)]| {
-                let sets: Vec<String> =
-                    props.iter().filter_map(|(prop, value)| sql_temporal(value).map(|value| format!("\"{prop}\" = {value}"))).collect();
+                let sets: Vec<String> = props.iter().filter_map(|(prop, value)| sql_temporal(value).map(|value| format!("\"{prop}\" = {value}"))).collect();
                 if !sets.is_empty() {
                     statements.push(format!("UPDATE gql_data.graph_{graph_id}_{table} SET {} WHERE \"{key}\" = {}", sets.join(", "), index + 1));
                 }
@@ -378,10 +392,7 @@ impl OpenCypherHttp {
         };
         if let Some(results) = body.get("results").and_then(Value::as_array) {
             let columns: Vec<String> = results.first().and_then(Value::as_object).map(|row| row.keys().cloned().collect()).unwrap_or_default();
-            let rows = results
-                .iter()
-                .map(|row| columns.iter().map(|column| row.get(column).map(Val::from_json).unwrap_or(Val::Null)).collect())
-                .collect();
+            let rows = results.iter().map(|row| columns.iter().map(|column| row.get(column).map(Val::from_json).unwrap_or(Val::Null)).collect()).collect();
             return Outcome::Rows { columns, rows };
         }
         let code = body.get("code").and_then(Value::as_str).unwrap_or("error");

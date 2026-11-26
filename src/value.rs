@@ -79,16 +79,17 @@ impl Val {
 
     pub fn from_json(value: &serde_json::Value) -> Val {
         // Neo4j writes nodes and relationships as objects with an elementId, and a path as a list of them.
-        if let serde_json::Value::Object(fields) = value {
-            if let Some(element) = Val::json_element(fields) {
-                return element;
-            }
+        if let serde_json::Value::Object(fields) = value
+            && let Some(element) = Val::json_element(fields)
+        {
+            return element;
         }
-        if let serde_json::Value::Array(items) = value {
-            if !items.is_empty() && items.iter().all(|item| item.get("elementId").is_some()) {
-                let relationships = items.iter().filter(|item| item.get("type").is_some()).map(Val::from_json).collect();
-                return Val::path(relationships);
-            }
+        if let serde_json::Value::Array(items) = value
+            && !items.is_empty()
+            && items.iter().all(|item| item.get("elementId").is_some())
+        {
+            let relationships = items.iter().filter(|item| item.get("type").is_some()).map(Val::from_json).collect();
+            return Val::path(relationships);
         }
         match value {
             serde_json::Value::Null => Val::Null,
@@ -101,6 +102,7 @@ impl Val {
         }
     }
 
+    #[cfg(feature = "duckgql")]
     pub fn from_duckdb(value: duckdb::types::Value) -> Val {
         use duckdb::types::Value as D;
         match value {
@@ -140,13 +142,14 @@ impl Val {
                 let fields: Vec<(String, Val)> = fields.iter().map(|(name, value)| (name.clone(), Val::from_duckdb(value.clone()))).collect();
                 // DuckGQL returns a node or an edge as a struct with its id, labels, and properties.
                 let get = |key: &str| fields.iter().find(|(name, _)| name == key).map(|(_, value)| value.clone());
-                let properties = || {
-                    fields.iter().filter(|(name, _)| !name.starts_with("__gql") && name != "vertex_id" && name != "edge_id").cloned().collect::<Vec<_>>()
-                };
+                let properties =
+                    || fields.iter().filter(|(name, _)| !name.starts_with("__gql") && name != "vertex_id" && name != "edge_id").cloned().collect::<Vec<_>>();
                 if get("vertex_id").is_some() {
                     let labels = match get("__gql_labels") {
                         Some(Val::Str(labels)) => labels.split(';').filter(|label| !label.is_empty()).map(String::from).collect(),
-                        Some(Val::List(labels)) => labels.iter().filter_map(|label| if let Val::Str(label) = label { Some(label.clone()) } else { None }).collect(),
+                        Some(Val::List(labels)) => {
+                            labels.iter().filter_map(|label| if let Val::Str(label) = label { Some(label.clone()) } else { None }).collect()
+                        }
                         _ => Vec::new(),
                     };
                     Val::node(labels, properties())

@@ -16,12 +16,6 @@ pub fn gql(query: &Query) -> String {
     render(query, gql_profile())
 }
 
-/// A literal as the profile writes it.
-pub fn literal(literal: &Lit, profile: &Profile) -> String {
-    let mut printer = Printer { profile, scope: false };
-    printer.literal(literal)
-}
-
 pub fn render(query: &Query, profile: &Profile) -> String {
     let mut printer = Printer { profile, scope: false };
     format!("{}{}", profile.prefix, printer.query(query))
@@ -92,11 +86,6 @@ impl Printer<'_> {
             Tail::None => {}
         }
         parts.join(" ")
-    }
-
-    /// `WITH *`, or `WITH` when nothing is bound yet.
-    fn with_all(&self) -> &'static str {
-        if self.scope { "WITH *," } else { "WITH" }
     }
 
     fn clause(&mut self, clause: &Clause) -> String {

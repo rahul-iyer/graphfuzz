@@ -1,0 +1,7 @@
+# Copy to .cargo/config.toml to build with --features duckgql.
+#
+# The duckgql connector links a libduckdb that has the duckgql extension built in: a build of
+# https://github.com/rahul-iyer/duckdb-gql. Point these at that build.
+[env]
+DUCKDB_LIB_DIR = "/path/to/duckdb-gql/build/release/src"
+DUCKDB_INCLUDE_DIR = "/path/to/duckdb-gql/duckdb/src/include"

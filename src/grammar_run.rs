@@ -97,7 +97,11 @@ fn digests(slot: &mut Slot, schema: &Schema) -> Result<Vec<Vec<String>>> {
 
 pub fn run_grammars(file: &FileConfig, slots: &mut [Slot], schema: &Schema, out: &Path) -> Result<()> {
     let mut report = String::new();
-    let _ = writeln!(report, "# graphfuzz grammar report\n\nSeed {}. Every choice each grammar offers, each tried with the shortest sentence that makes it, in a rolled-back transaction.\n", file.seed);
+    let _ = writeln!(
+        report,
+        "# graphfuzz grammar report\n\nSeed {}. Every choice each grammar offers, each tried with the shortest sentence that makes it, in a rolled-back transaction.\n",
+        file.seed
+    );
     let mut jsonl = std::fs::File::create(out.join("grammar.jsonl"))?;
     let undirected = file.schema.build(true)?;
     for (name, settings) in &file.grammars {
@@ -216,7 +220,10 @@ fn run_grammar(
         started.elapsed().as_secs_f64(),
         if reloads.is_empty() { "none".to_string() } else { reloads.iter().map(|(engine, count)| format!("{engine} {count}")).collect::<Vec<_>>().join(", ") }
     );
-    let _ = writeln!(report, "| engine | sentences | ok | NotImplemented | Parser | Binder | Runtime | Internal | Crash | Timeout | targets failing on their own |\n|---|---|---|---|---|---|---|---|---|---|---|");
+    let _ = writeln!(
+        report,
+        "| engine | sentences | ok | NotImplemented | Parser | Binder | Runtime | Internal | Crash | Timeout | targets failing on their own |\n|---|---|---|---|---|---|---|---|---|---|---|"
+    );
     for engine in &names {
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
         for per_engine in answers.values() {
@@ -241,13 +248,17 @@ fn run_grammar(
     for engine in &names {
         let own: Vec<&TargetResult> = results.iter().filter(|result| result.own_failures.contains(engine)).collect();
         // Crashes and internal errors first: they are bugs whatever the sentence means.
-        let severe: Vec<&&TargetResult> = own.iter().filter(|result| matches!(result.answers[engine], Answer::Crash | Answer::Timeout | Answer::Error { kind: ErrorKind::Internal, .. })).collect();
+        let severe: Vec<&&TargetResult> = own
+            .iter()
+            .filter(|result| matches!(result.answers[engine], Answer::Crash | Answer::Timeout | Answer::Error { kind: ErrorKind::Internal, .. }))
+            .collect();
         if !severe.is_empty() {
             let _ = writeln!(report, "\n### {name} on {engine}: crashes, timeouts, and internal errors ({})\n", severe.len());
             let mut seen = BTreeSet::new();
             for result in severe {
                 if seen.insert(result.answers[engine].message()) {
-                    let _ = writeln!(report, "- `{}` — {}\n  ```\n  {}\n  ```", result.answers[engine].message().replace('`', "'"), result.target, result.sentence);
+                    let _ =
+                        writeln!(report, "- `{}` — {}\n  ```\n  {}\n  ```", result.answers[engine].message().replace('`', "'"), result.target, result.sentence);
                 }
             }
         }
@@ -266,7 +277,13 @@ fn run_grammar(
             }
             let common = messages.iter().max_by_key(|(_, count)| **count).map(|(message, _)| message.clone()).unwrap_or_default();
             let shortest = group.iter().min_by_key(|result| result.sentence.len()).unwrap();
-            let _ = writeln!(report, "| {rule} | {} | `{}` | `{}` |", group.len(), common.replace('|', "\\|").replace('`', "'"), shortest.sentence.replace('|', "\\|").replace('`', "'"));
+            let _ = writeln!(
+                report,
+                "| {rule} | {} | `{}` | `{}` |",
+                group.len(),
+                common.replace('|', "\\|").replace('`', "'"),
+                shortest.sentence.replace('|', "\\|").replace('`', "'")
+            );
         }
         let mut by_message: BTreeMap<String, Vec<&TargetResult>> = BTreeMap::new();
         for result in &own {

@@ -19,7 +19,10 @@ pub enum Atom {
     Rule(String),
     Literal(String),
     /// Character ranges, or the characters not in them.
-    Set { ranges: Vec<(char, char)>, negated: bool },
+    Set {
+        ranges: Vec<(char, char)>,
+        negated: bool,
+    },
     Any,
     /// Every token or character except these literals, as `~('a' | 'b')`.
     NotLiterals(Vec<String>),
@@ -44,6 +47,7 @@ pub struct Rule {
     pub lexer: bool,
     pub fragment: bool,
     /// A lexer rule whose tokens the parser never sees (`-> skip`, `-> channel(HIDDEN)`).
+    #[allow(dead_code)] // parsed for completeness; not used yet
     pub hidden: bool,
     /// The rule a lifted group came from.
     pub parent: Option<String>,
@@ -52,6 +56,7 @@ pub struct Rule {
 
 pub struct Grammar {
     pub name: String,
+    #[allow(dead_code)] // parsed from `options { caseInsensitive = true; }`; sentences use the vocabulary's spelling
     pub case_insensitive: bool,
     pub rules: BTreeMap<String, Rule>,
     /// Parser rules in file order; the first is the usual start rule.
@@ -319,20 +324,22 @@ impl Reader {
     }
 
     fn eat(&mut self, punct: &str) -> bool {
-        if self.peek() == Some(&Tok::Punct(match punct {
-            ":" => ":",
-            ";" => ";",
-            "|" => "|",
-            "(" => "(",
-            ")" => ")",
-            "#" => "#",
-            "->" => "->",
-            "," => ",",
-            ".." => "..",
-            "=" => "=",
-            "+=" => "+=",
-            _ => return false,
-        })) {
+        if self.peek()
+            == Some(&Tok::Punct(match punct {
+                ":" => ":",
+                ";" => ";",
+                "|" => "|",
+                "(" => "(",
+                ")" => ")",
+                "#" => "#",
+                "->" => "->",
+                "," => ",",
+                ".." => "..",
+                "=" => "=",
+                "+=" => "+=",
+                _ => return false,
+            }))
+        {
             self.position += 1;
             true
         } else {
@@ -491,15 +498,14 @@ pub fn parse(text: &str) -> Result<Grammar> {
                 reader.expect(";")?;
             }
             Tok::Name(word) if word == "options" || word == "tokens" || word == "channels" => {
-                if let Some(Tok::Block(body)) = reader.next() {
-                    if word == "options" && body.replace(' ', "").contains("caseInsensitive=true") {
-                        case_insensitive = true;
-                    }
+                if let Some(Tok::Block(body)) = reader.next()
+                    && word == "options"
+                    && body.replace(' ', "").contains("caseInsensitive=true")
+                {
+                    case_insensitive = true;
                 }
             }
-            Tok::Name(word) if word == "import" || word == "mode" => {
-                while !matches!(reader.next(), Some(Tok::Punct(";")) | None) {}
-            }
+            Tok::Name(word) if word == "import" || word == "mode" => while !matches!(reader.next(), Some(Tok::Punct(";")) | None) {},
             Tok::Punct("@") => {
                 // A named action: @header { ... } or @parser::members { ... }.
                 while !matches!(reader.next(), Some(Tok::Block(_)) | None) {}
@@ -521,10 +527,11 @@ pub fn parse(text: &str) -> Result<Grammar> {
                 let lexer = rule.chars().next().is_some_and(|c| c.is_uppercase());
                 let start = reader.position;
                 let alts = reader.alternatives(&rule, lexer).with_context(|| format!("in rule {rule}"))?;
-                let hidden = lexer && reader.tokens[start..reader.position].iter().enumerate().any(|(index, token)| {
-                    *token == Tok::Punct("->")
-                        && matches!(reader.tokens.get(start + index + 1), Some(Tok::Name(command)) if command == "skip" || command == "channel")
-                });
+                let hidden = lexer
+                    && reader.tokens[start..reader.position].iter().enumerate().any(|(index, token)| {
+                        *token == Tok::Punct("->")
+                            && matches!(reader.tokens.get(start + index + 1), Some(Tok::Name(command)) if command == "skip" || command == "channel")
+                    });
                 reader.expect(";").with_context(|| format!("at the end of rule {rule}"))?;
                 if !lexer {
                     order.push(rule.clone());
@@ -541,10 +548,10 @@ pub fn parse(text: &str) -> Result<Grammar> {
     for rule in rules.values() {
         for alt in &rule.alts {
             for element in &alt.elements {
-                if let Atom::Rule(name) = &element.atom {
-                    if !rules.contains_key(name) {
-                        bail!("rule {} refers to undefined rule {name}", rule.name);
-                    }
+                if let Atom::Rule(name) = &element.atom
+                    && !rules.contains_key(name)
+                {
+                    bail!("rule {} refers to undefined rule {name}", rule.name);
                 }
             }
         }

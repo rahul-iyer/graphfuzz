@@ -1,2 +1,7 @@
 /target
 /runs
+# Machine-specific: where your DuckGQL build is. See .cargo/config.toml.example.
+/.cargo/config.toml
+# Local research notes and reports.
+/research_notes
+/reports

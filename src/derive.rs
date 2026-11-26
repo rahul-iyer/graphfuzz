@@ -81,6 +81,7 @@ struct Step {
 
 pub struct Sentence {
     pub text: String,
+    #[allow(dead_code)] // the choice this sentence was built for; reports key sentences by `covered`
     pub target: Target,
     pub covered: BTreeSet<Target>,
 }
@@ -278,14 +279,13 @@ impl<'g> Deriver<'g> {
                     for count in counts {
                         targets.push(Target::Count { rule: name.clone(), alt, element: index, count: *count });
                     }
-                    if coverage == Coverage::Pairs {
-                        if let Atom::Rule(child) = &element.atom {
-                            if self.is_parser_rule(child) {
-                                for child_alt in 0..self.grammar.rules[child].alts.len() {
-                                    if self.alt_cost(child, child_alt) < UNPRODUCTIVE {
-                                        targets.push(Target::Pair { rule: name.clone(), alt, element: index, child_alt });
-                                    }
-                                }
+                    if coverage == Coverage::Pairs
+                        && let Atom::Rule(child) = &element.atom
+                        && self.is_parser_rule(child)
+                    {
+                        for child_alt in 0..self.grammar.rules[child].alts.len() {
+                            if self.alt_cost(child, child_alt) < UNPRODUCTIVE {
+                                targets.push(Target::Pair { rule: name.clone(), alt, element: index, child_alt });
                             }
                         }
                     }
@@ -324,10 +324,11 @@ impl<'g> Deriver<'g> {
         let mut text = String::new();
         for token in tokens {
             let word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
-            if let (Some(last), Some(first)) = (text.chars().last(), token.chars().next()) {
-                if word(last) && word(first) {
-                    text.push(' ');
-                }
+            if let (Some(last), Some(first)) = (text.chars().last(), token.chars().next())
+                && word(last)
+                && word(first)
+            {
+                text.push(' ');
             }
             text.push_str(token);
         }
@@ -381,7 +382,7 @@ impl<'g> Deriver<'g> {
         // A value nothing here is trying a choice in: a value of the type the context wants.
         if !forced && self.typing.value_rules.iter().any(|name| name == rule) {
             let ty = self.typing.types.get(rule).cloned().or_else(|| state.context.clone()).unwrap_or_else(|| "INT64".to_string());
-            let ty = state.resolve(&ty, &self.typing);
+            let ty = state.resolve(&ty, self.typing);
             if let Some(values) = self.typing.values.get(&ty) {
                 let used = state.uses.entry(ty.clone()).or_default();
                 tokens.push(values[*used % values.len()].clone());
@@ -415,7 +416,7 @@ impl<'g> Deriver<'g> {
                 step.is_some_and(|step| step.element == Some(*index) && step.count > 0) || self.present.contains(&(rule.to_string(), alt, *index))
             });
         if let (Some(declared), true) = (declared, operator_used) {
-            state.context = Some(state.resolve(&declared, &self.typing));
+            state.context = Some(state.resolve(&declared, self.typing));
         }
         for (index, element) in definition.alts[alt].elements.iter().enumerate() {
             let continues = step.is_some_and(|step| step.element == Some(index));
@@ -425,7 +426,11 @@ impl<'g> Deriver<'g> {
                 match element.suffix {
                     Suffix::One | Suffix::Plus => 1,
                     Suffix::Optional | Suffix::Star => {
-                        if self.present.contains(&(rule.to_string(), alt, index)) { 1 } else { 0 }
+                        if self.present.contains(&(rule.to_string(), alt, index)) {
+                            1
+                        } else {
+                            0
+                        }
                     }
                 }
             };
@@ -436,10 +441,10 @@ impl<'g> Deriver<'g> {
                 let rest: &[Step] = if continues && occurrence == 0 { &plan[1..] } else { &[] };
                 match &element.atom {
                     Atom::Rule(child) => {
-                        if let Some(child_alt) = self.expand(child, rest, tokens, covered, occurrences, depth + 1, state) {
-                            if self.is_parser_rule(child) {
-                                covered.insert(Target::Pair { rule: rule.to_string(), alt, element: index, child_alt });
-                            }
+                        if let Some(child_alt) = self.expand(child, rest, tokens, covered, occurrences, depth + 1, state)
+                            && self.is_parser_rule(child)
+                        {
+                            covered.insert(Target::Pair { rule: rule.to_string(), alt, element: index, child_alt });
                         }
                     }
                     Atom::Literal(text) => tokens.push(text.clone()),
@@ -463,13 +468,21 @@ impl<'g> Deriver<'g> {
                 let atom = match &element.atom {
                     Atom::Rule(name) => match self.grammar.rules.get(name) {
                         Some(lifted) if lifted.parent.is_some() => {
-                            let inner: Vec<String> = lifted.alts.iter().map(|alt| {
-                                alt.elements.iter().map(|element| match &element.atom {
-                                    Atom::Rule(name) => name.clone(),
-                                    Atom::Literal(text) => format!("'{text}'"),
-                                    _ => "…".to_string(),
-                                }).collect::<Vec<_>>().join(" ")
-                            }).collect();
+                            let inner: Vec<String> = lifted
+                                .alts
+                                .iter()
+                                .map(|alt| {
+                                    alt.elements
+                                        .iter()
+                                        .map(|element| match &element.atom {
+                                            Atom::Rule(name) => name.clone(),
+                                            Atom::Literal(text) => format!("'{text}'"),
+                                            _ => "…".to_string(),
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                })
+                                .collect();
                             format!("{name} = ( {} )", inner.join(" | "))
                         }
                         _ => name.clone(),

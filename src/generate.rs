@@ -191,10 +191,7 @@ pub const GROUPS: &[(&str, &[&str])] = &[
         "functions",
         &["coalesce", "nullif", "cast", "string_fn", "char_length", "numeric_fn", "mod", "power", "trig", "log_fn", "size", "path_length", "element_id"],
     ),
-    (
-        "expressions",
-        &["arith", "div", "neg", "concat", "or", "not", "xor", "is_null", "case", "simple_case", "list", "float_literal", "string_literal"],
-    ),
+    ("expressions", &["arith", "div", "neg", "concat", "or", "not", "xor", "is_null", "case", "simple_case", "list", "float_literal", "string_literal"]),
     (
         "predicates",
         &[
@@ -259,6 +256,7 @@ pub enum Kind {
     Edge(Option<&'static str>),
     Path,
     Value(Ty),
+    #[allow(dead_code)] // the element type, for typed list expressions to come
     List(Ty),
 }
 
@@ -308,7 +306,17 @@ fn feature_name(name: &str) -> &'static str {
 
 impl<'a> Gen<'a> {
     pub fn new(seed: u64, schema: &'a Schema, config: &'a Config) -> Gen<'a> {
-        Gen { rng: Rng::new(seed), schema, config, tags: BTreeSet::new(), scope: Vec::new(), next_name: 0, next_id: 1000, returned: Vec::new(), in_exists: false }
+        Gen {
+            rng: Rng::new(seed),
+            schema,
+            config,
+            tags: BTreeSet::new(),
+            scope: Vec::new(),
+            next_name: 0,
+            next_id: 1000,
+            returned: Vec::new(),
+            in_exists: false,
+        }
     }
 
     /// Whether to use a feature here. In an isolation run only the isolated feature is ever used.
@@ -555,11 +563,7 @@ impl<'a> Gen<'a> {
         };
         clauses.push(Clause::Match { optional: false, mode: None, paths: vec![path], filter: None });
         let name = self.fresh("c");
-        let value = if self.want("agg_count", 0.5) {
-            Expr::Agg { name: "count".to_string(), distinct: false, arg: None }
-        } else {
-            self.int_expr(1)
-        };
+        let value = if self.want("agg_count", 0.5) { Expr::Agg { name: "count".to_string(), distinct: false, arg: None } } else { self.int_expr(1) };
         let aggregated = contains_aggregate(&value);
         let body = Linear {
             clauses,
@@ -642,7 +646,13 @@ impl<'a> Gen<'a> {
             Some(var) => NodePat { var: Some(var.name.clone()), ..Default::default() },
             None => self.node_pattern(start_label, true),
         };
-        let hops_count = if self.want("two_hops", 0.2) { 2 } else if self.rng.chance(0.75) || quantified_hop { 1 } else { 0 };
+        let hops_count = if self.want("two_hops", 0.2) {
+            2
+        } else if self.rng.chance(0.75) || quantified_hop {
+            1
+        } else {
+            0
+        };
         let mut hops = Vec::new();
         let mut current = start_label;
         for hop in 0..hops_count {
@@ -779,12 +789,12 @@ impl<'a> Gen<'a> {
         if var.is_some() && self.want("element_where", 0.04) {
             filter = Some(self.bool_expr(1));
         }
-        if quant.is_none() && self.want("property_map", 0.03) {
-            if let Some(LabelExpr::Name(name)) = &label {
-                if let Some(prop) = self.schema.edge(name).props.first() {
-                    props.push((prop.name.to_string(), Expr::Lit(Lit::Int(self.rng.range(1, 30)))));
-                }
-            }
+        if quant.is_none()
+            && self.want("property_map", 0.03)
+            && let Some(LabelExpr::Name(name)) = &label
+            && let Some(prop) = self.schema.edge(name).props.first()
+        {
+            props.push((prop.name.to_string(), Expr::Lit(Lit::Int(self.rng.range(1, 30)))));
         }
         (EdgePat { var, label, dir, quant, props, filter }, next_label)
     }
@@ -981,10 +991,10 @@ impl<'a> Gen<'a> {
     }
 
     fn leaf(&mut self, ty: Ty) -> Expr {
-        if self.rng.chance(0.7) {
-            if let Some(expr) = if self.rng.chance(0.75) { self.property(ty) } else { self.value_var(ty) } {
-                return expr;
-            }
+        if self.rng.chance(0.7)
+            && let Some(expr) = if self.rng.chance(0.75) { self.property(ty) } else { self.value_var(ty) }
+        {
+            return expr;
         }
         match ty {
             Ty::Int => Expr::Lit(Lit::Int(self.rng.range(0, 40))),
@@ -1242,10 +1252,15 @@ impl<'a> Gen<'a> {
         let weights = &self.config.weights;
         let focused: Vec<&'static str> = kinds.iter().copied().filter(|kind| weights.focus.contains(kind)).collect();
         if !focused.is_empty() {
-            return *self.rng.pick(&focused);
+            return self.rng.pick(&focused);
         }
-        let weighted: Vec<(&'static str, f64)> =
-            kinds.iter().copied().filter(|kind| !weights.disabled.contains(kind)).map(|kind| (kind, weights.multiplier(kind))).filter(|(_, weight)| *weight > 0.0).collect();
+        let weighted: Vec<(&'static str, f64)> = kinds
+            .iter()
+            .copied()
+            .filter(|kind| !weights.disabled.contains(kind))
+            .map(|kind| (kind, weights.multiplier(kind)))
+            .filter(|(_, weight)| *weight > 0.0)
+            .collect();
         let total: f64 = weighted.iter().map(|(_, weight)| weight).sum();
         let mut draw = (self.rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * total;
         for (kind, weight) in &weighted {
@@ -1320,8 +1335,16 @@ impl<'a> Gen<'a> {
                 self.scope = vec![Var { name: "a".to_string(), kind: Kind::Node(Some(source)) }, Var { name: "b".to_string(), kind: Kind::Node(Some(target)) }];
                 let condition = Expr::Bin(
                     BinOp::And,
-                    Box::new(Expr::Bin(BinOp::Le, Box::new(Expr::Prop("a".to_string(), "id".to_string())), Box::new(Expr::Lit(Lit::Int(self.rng.range(1, 3)))))),
-                    Box::new(Expr::Bin(BinOp::Eq, Box::new(Expr::Prop("b".to_string(), "id".to_string())), Box::new(Expr::Lit(Lit::Int(self.rng.range(1, 3)))))),
+                    Box::new(Expr::Bin(
+                        BinOp::Le,
+                        Box::new(Expr::Prop("a".to_string(), "id".to_string())),
+                        Box::new(Expr::Lit(Lit::Int(self.rng.range(1, 3)))),
+                    )),
+                    Box::new(Expr::Bin(
+                        BinOp::Eq,
+                        Box::new(Expr::Prop("b".to_string(), "id".to_string())),
+                        Box::new(Expr::Lit(Lit::Int(self.rng.range(1, 3)))),
+                    )),
                 );
                 let props = match self.schema.edge(label).props.first() {
                     Some(prop) if prop.ty == Ty::Int => vec![(prop.name.to_string(), self.int_expr(1))],
@@ -1360,8 +1383,12 @@ impl<'a> Gen<'a> {
                 let label = self.rng.pick(&self.schema.nodes).label;
                 let node = self.node_pattern(Some(label), true);
                 let filter = self.maybe_where();
-                let mut clauses =
-                    vec![Clause::Match { optional: false, mode: None, paths: vec![PathPat { var: None, search: None, mode: None, start: node, hops: vec![] }], filter }];
+                let mut clauses = vec![Clause::Match {
+                    optional: false,
+                    mode: None,
+                    paths: vec![PathPat { var: None, search: None, mode: None, start: node, hops: vec![] }],
+                    filter,
+                }];
                 let nodes = self.vars_where(|kind| matches!(kind, Kind::Node(Some(_))));
                 let Some(node) = nodes.first().cloned() else {
                     return linear(clauses);
@@ -1392,7 +1419,14 @@ impl<'a> Gen<'a> {
                     mode: None,
                     start: NodePat { var: Some("a".to_string()), label: Some(LabelExpr::Name(source.to_string())), ..Default::default() },
                     hops: vec![(
-                        EdgePat { var: Some("e".to_string()), label: Some(LabelExpr::Name(label.to_string())), dir: Dir::Right, quant: None, props: vec![], filter: None },
+                        EdgePat {
+                            var: Some("e".to_string()),
+                            label: Some(LabelExpr::Name(label.to_string())),
+                            dir: Dir::Right,
+                            quant: None,
+                            props: vec![],
+                            filter: None,
+                        },
                         NodePat { var: None, label: Some(LabelExpr::Name(target.to_string())), ..Default::default() },
                     )],
                 };
@@ -1410,7 +1444,8 @@ impl<'a> Gen<'a> {
                     start: NodePat { var: Some("d".to_string()), label: Some(LabelExpr::Name(label.to_string())), ..Default::default() },
                     hops: vec![],
                 };
-                let condition = Expr::Bin(BinOp::Eq, Box::new(Expr::Prop("d".to_string(), "id".to_string())), Box::new(Expr::Lit(Lit::Int(self.rng.range(1, 4)))));
+                let condition =
+                    Expr::Bin(BinOp::Eq, Box::new(Expr::Prop("d".to_string(), "id".to_string())), Box::new(Expr::Lit(Lit::Int(self.rng.range(1, 4)))));
                 linear(vec![
                     Clause::Match { optional: false, mode: None, paths: vec![path], filter: Some(condition) },
                     Clause::Delete { detach: kind == "detach_delete", vars: vec!["d".to_string()] },
@@ -1453,7 +1488,11 @@ impl<'a> Gen<'a> {
                         optional: false,
                         mode: None,
                         paths: vec![path],
-                        filter: Some(Expr::Bin(BinOp::Le, Box::new(Expr::Prop("q".to_string(), "id".to_string())), Box::new(Expr::Lit(Lit::Int(self.rng.range(1, 6)))))),
+                        filter: Some(Expr::Bin(
+                            BinOp::Le,
+                            Box::new(Expr::Prop("q".to_string(), "id".to_string())),
+                            Box::new(Expr::Lit(Lit::Int(self.rng.range(1, 6)))),
+                        )),
                     }],
                     tail: Tail::Return(Return {
                         distinct: false,
@@ -1480,30 +1519,9 @@ pub fn contains_aggregate(expr: &Expr) -> bool {
             contains_aggregate(inner)
         }
         Expr::Func(_, args) | Expr::List(args) => args.iter().any(contains_aggregate),
-        Expr::Case(arms, otherwise) => arms.iter().any(|(when, then)| contains_aggregate(when) || contains_aggregate(then)) || otherwise.as_deref().is_some_and(contains_aggregate),
+        Expr::Case(arms, otherwise) => {
+            arms.iter().any(|(when, then)| contains_aggregate(when) || contains_aggregate(then)) || otherwise.as_deref().is_some_and(contains_aggregate)
+        }
         _ => false,
     }
-}
-
-/// The type of an expression the generator built, when it is a scalar.
-pub fn expr_type(expr: &Expr, scope: &[Var]) -> Option<Ty> {
-    Some(match expr {
-        Expr::Lit(Lit::Int(_)) => Ty::Int,
-        Expr::Lit(Lit::Float(_)) => Ty::Float,
-        Expr::Lit(Lit::Str(_)) => Ty::Str,
-        Expr::Lit(Lit::Bool(_)) => Ty::Bool,
-        Expr::Var(name) => match scope.iter().find(|var| &var.name == name).map(|var| &var.kind) {
-            Some(Kind::Value(ty)) => *ty,
-            _ => return None,
-        },
-        Expr::Prop(..) => return None,
-        Expr::Bin(op, left, _) => match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => expr_type(left, scope)?,
-            BinOp::Concat => Ty::Str,
-            _ => Ty::Bool,
-        },
-        Expr::Not(_) | Expr::IsNull(..) | Expr::Typed(..) | Expr::Normalized(..) | Expr::Labeled(..) | Expr::Exists(_) => Ty::Bool,
-        Expr::Agg { name, .. } if name == "count" => Ty::Int,
-        _ => return None,
-    })
 }

@@ -28,22 +28,45 @@ pub enum ErrorKind {
 pub enum Verdict {
     /// The engine and the reference returned the same rows.
     Agree,
-    BothReject { target: String, reference: String },
+    BothReject {
+        target: String,
+        reference: String,
+    },
     /// The rows differ: a correctness bug in one of the engines.
     /// The first 20 rows of each side, and how many each returned.
-    Mismatch { target: Vec<String>, reference: Vec<String>, target_rows: usize, reference_rows: usize },
+    Mismatch {
+        target: Vec<String>,
+        reference: Vec<String>,
+        target_rows: usize,
+        reference_rows: usize,
+    },
     /// The rows differ only by match mode: the reference returns the engine's rows once every MATCH may
     /// repeat edges (REPEATABLE ELEMENTS). One known difference, kept apart from wrong answers.
-    MatchMode { target_rows: usize, reference_rows: usize },
+    MatchMode {
+        target_rows: usize,
+        reference_rows: usize,
+    },
     /// The engine rejected what the reference ran.
-    TargetRejects { kind: ErrorKind, message: String },
+    TargetRejects {
+        kind: ErrorKind,
+        message: String,
+    },
     /// The reference rejected what the engine ran.
-    ReferenceRejects { message: String },
+    ReferenceRejects {
+        message: String,
+    },
     /// The reference cannot express the case; the engine ran it and passed its own checks.
     TargetOnlyOk,
-    TargetOnlyError { kind: ErrorKind, message: String },
+    TargetOnlyError {
+        kind: ErrorKind,
+        message: String,
+    },
     /// A query and a rewrite of it that must have the same answer did not.
-    Metamorphic { oracle: String, variant: String, detail: String },
+    Metamorphic {
+        oracle: String,
+        variant: String,
+        detail: String,
+    },
     Crash(String),
     Timeout,
     /// Not checked, and why.
@@ -101,7 +124,15 @@ pub fn classify(message: &str) -> ErrorKind {
         ErrorKind::Internal
     } else if any(&["not implemented", "not supported", "unsupported"]) {
         ErrorKind::NotImplemented
-    } else if any(&["invalid input", "mismatched input", "no viable alternative", "extraneous input", "syntax error at or near", "parser error", "parser exception"]) {
+    } else if any(&[
+        "invalid input",
+        "mismatched input",
+        "no viable alternative",
+        "extraneous input",
+        "syntax error at or near",
+        "parser error",
+        "parser exception",
+    ]) {
         ErrorKind::Parser
     } else if any(&["binder", "type mismatch", "not defined", "semanticerror", "statement.syntaxerror"]) {
         // Neo4j files type and scoping errors under SyntaxError; only "Invalid input" is a syntax error.
@@ -175,7 +206,8 @@ fn repeatable(original: &Query) -> Option<Query> {
             match clause {
                 // Only a pattern of two edges or more, or a quantified one, can use an edge twice.
                 Clause::Match { mode: mode @ None, paths, .. }
-                    if paths.iter().map(|path| path.hops.len()).sum::<usize>() > 1 || paths.iter().any(|path| path.hops.iter().any(|(edge, _)| edge.quant.is_some())) =>
+                    if paths.iter().map(|path| path.hops.len()).sum::<usize>() > 1
+                        || paths.iter().any(|path| path.hops.iter().any(|(edge, _)| edge.quant.is_some())) =>
                 {
                     *mode = Some(MatchMode::RepeatableElements);
                     changed = true;
@@ -328,7 +360,8 @@ impl Slot {
         }
         let Query::Linear(linear) = &generated.query else { return None };
         let rows = rows.to_vec();
-        let failure = |oracle: &str, variant: &Query, detail: String| Verdict::Metamorphic { oracle: oracle.to_string(), variant: render::gql(variant), detail };
+        let failure =
+            |oracle: &str, variant: &Query, detail: String| Verdict::Metamorphic { oracle: oracle.to_string(), variant: render::gql(variant), detail };
 
         // Ternary logic partitioning: p, NOT p, and p IS UNKNOWN split the rows.
         if let Some(predicate) = &generated.partition {
@@ -414,11 +447,11 @@ impl Slot {
                 })
             };
             let (original, variant) = (counted(&linear.clauses), counted(&simpler.clauses));
-            if let (Some(before), Some(after)) = (self.rows(&original), self.rows(&variant)) {
-                if before != after {
-                    let count = |rows: &[Row]| rows.first().and_then(|row| row.first()).map(Val::key).unwrap_or_default();
-                    return Some(failure("idempotent_label", &variant, format!("count(*) = {} with A|A or A&A, {} with A", count(&before), count(&after))));
-                }
+            if let (Some(before), Some(after)) = (self.rows(&original), self.rows(&variant))
+                && before != after
+            {
+                let count = |rows: &[Row]| rows.first().and_then(|row| row.first()).map(Val::key).unwrap_or_default();
+                return Some(failure("idempotent_label", &variant, format!("count(*) = {} with A|A or A&A, {} with A", count(&before), count(&after))));
             }
         }
 
@@ -469,7 +502,9 @@ impl<'a> Checker<'a> {
             reduced: BTreeMap::new(),
         };
         let reference = match self.reference {
-            Some(index) if self.slots[index].profile.missing(&generated.tags).is_empty() && (!generated.mutation || self.slots[index].engine.transactional()) => {
+            Some(index)
+                if self.slots[index].profile.missing(&generated.tags).is_empty() && (!generated.mutation || self.slots[index].engine.transactional()) =>
+            {
                 let slot = &mut self.slots[index];
                 let text = render::render(&generated.query, &slot.profile);
                 result.queries.insert(slot.name.clone(), text.clone());
@@ -543,15 +578,20 @@ impl<'a> Checker<'a> {
                                 let (target_rows, reference_rows) = (left.len(), right.len());
                                 // Neo4j never repeats a relationship within one MATCH; engines that do differ
                                 // from it wherever a pattern can reuse an edge. Name that difference once.
-                                if let (false, Some(reference), Some(variant)) = (generated.mutation, self.reference, repeatable(&generated.query)) {
-                                    if let Some(rows) = self.slots[reference].rows(&variant) {
-                                        let again = if ordered(&generated.query) { sequence(&rows) } else { multiset(&rows) };
-                                        if again == left {
-                                            return Ok(Verdict::MatchMode { target_rows, reference_rows });
-                                        }
+                                if let (false, Some(reference), Some(variant)) = (generated.mutation, self.reference, repeatable(&generated.query))
+                                    && let Some(rows) = self.slots[reference].rows(&variant)
+                                {
+                                    let again = if ordered(&generated.query) { sequence(&rows) } else { multiset(&rows) };
+                                    if again == left {
+                                        return Ok(Verdict::MatchMode { target_rows, reference_rows });
                                     }
                                 }
-                                return Ok(Verdict::Mismatch { target: left.into_iter().take(20).collect(), reference: right.into_iter().take(20).collect(), target_rows, reference_rows });
+                                return Ok(Verdict::Mismatch {
+                                    target: left.into_iter().take(20).collect(),
+                                    reference: right.into_iter().take(20).collect(),
+                                    target_rows,
+                                    reference_rows,
+                                });
                             }
                         }
                         (Outcome::Error(message), _) => {

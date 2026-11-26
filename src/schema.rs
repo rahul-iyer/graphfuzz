@@ -22,8 +22,6 @@ pub enum Ty {
 }
 
 impl Ty {
-    pub const ALL: &'static [Ty] = &[Ty::Int, Ty::Float, Ty::Str, Ty::Bool, Ty::Date, Ty::LocalDateTime, Ty::ZonedDateTime, Ty::Decimal];
-
     pub fn parse(text: &str) -> Result<Ty> {
         Ok(match text.trim().to_uppercase().as_str() {
             "INT64" | "INT" | "INTEGER" => Ty::Int,
@@ -50,10 +48,6 @@ impl Ty {
             Ty::ZonedDateTime => "ZONED DATETIME",
             Ty::Decimal => "DECIMAL(18,3)",
         }
-    }
-
-    pub fn temporal(self) -> bool {
-        matches!(self, Ty::Date | Ty::LocalDateTime | Ty::ZonedDateTime)
     }
 
     /// A random value of the type, as a literal.
@@ -229,7 +223,6 @@ pub struct FixtureEdge {
 }
 
 pub struct Fixture {
-    pub seed: u64,
     pub nodes: Vec<FixtureNode>,
     pub edges: Vec<FixtureEdge>,
 }
@@ -258,11 +251,8 @@ impl Schema {
     pub fn gql_create_graph(&self, name: &str) -> String {
         let mut elements = Vec::new();
         for node in &self.nodes {
-            let props: Vec<String> = node
-                .props
-                .iter()
-                .map(|prop| format!("{} {}{}", prop.name, prop.ty.gql_name(), if prop.required { " NOT NULL" } else { "" }))
-                .collect();
+            let props: Vec<String> =
+                node.props.iter().map(|prop| format!("{} {}{}", prop.name, prop.ty.gql_name(), if prop.required { " NOT NULL" } else { "" })).collect();
             elements.push(format!("({} :{} {{{}}})", node.label, node.label, props.join(", ")));
         }
         for edge in &self.edges {
@@ -281,7 +271,7 @@ impl Schema {
     pub fn fixture(&self, seed: u64) -> Fixture {
         let mut rng = Rng::new(seed ^ 0x5eed_f1c7_0000_0001);
         let names = ["Ada", "Bob", "Cy", "Dee", "Eve", "Fay", "Gus", "Hal", "Ivy", "Jo", "Kim", "Lu"];
-        let mut fixture = Fixture { seed, nodes: Vec::new(), edges: Vec::new() };
+        let mut fixture = Fixture { nodes: Vec::new(), edges: Vec::new() };
         for node in &self.nodes {
             for id in 1..=node.count {
                 let mut props = Vec::new();
@@ -350,7 +340,8 @@ impl Fixture {
         }
         let id = |var: &str, value: i64| Expr::Bin(BinOp::Eq, Box::new(Expr::Prop(var.to_string(), "id".to_string())), Box::new(Expr::Lit(Lit::Int(value))));
         for edge in &self.edges {
-            let endpoint = |var: &str, label: &str| NodePat { var: Some(var.to_string()), label: Some(LabelExpr::Name(label.to_string())), props: vec![], filter: None };
+            let endpoint =
+                |var: &str, label: &str| NodePat { var: Some(var.to_string()), label: Some(LabelExpr::Name(label.to_string())), props: vec![], filter: None };
             let bound = |var: &str| NodePat { var: Some(var.to_string()), label: None, props: vec![], filter: None };
             let arc = EdgePat {
                 var: None,

@@ -60,11 +60,11 @@ fn example(out: &mut String, case: &CaseResult, engine: &str, reference: Option<
     }
     let _ = writeln!(out, "Original, as sent to {engine} (case {}, {}):", case.id, case.phase);
     out.push_str(&code(case.queries.get(engine).unwrap_or(&case.gql)));
-    if let Some(reference) = reference {
-        if let Some(text) = case.queries.get(reference) {
-            let _ = writeln!(out, "As sent to {reference}:");
-            out.push_str(&code(text));
-        }
+    if let Some(reference) = reference
+        && let Some(text) = case.queries.get(reference)
+    {
+        let _ = writeln!(out, "As sent to {reference}:");
+        out.push_str(&code(text));
     }
 }
 
@@ -83,10 +83,8 @@ pub fn markdown(cases: &[CaseResult], header: &str, engines: &[String], referenc
     }
     let _ = writeln!(out, "## Verdicts\n\n| verdict | {} |\n|---|{}", engines.join(" | "), "---|".repeat(engines.len()));
     for name in &names {
-        let counts: Vec<String> = engines
-            .iter()
-            .map(|engine| cases.iter().filter(|case| verdict(case, engine).map(Verdict::name) == Some(*name)).count().to_string())
-            .collect();
+        let counts: Vec<String> =
+            engines.iter().map(|engine| cases.iter().filter(|case| verdict(case, engine).map(Verdict::name) == Some(*name)).count().to_string()).collect();
         let _ = writeln!(out, "| {name} | {} |", counts.join(" | "));
     }
     let _ = writeln!(
@@ -139,7 +137,8 @@ fn engine_section(out: &mut String, cases: &[CaseResult], engine: &str, referenc
     }
     let mut groups: BTreeMap<String, Vec<&CaseResult>> = BTreeMap::new();
     for case in &mismatches {
-        let key = case.reduced.get(engine).map(|reduced| reduced.features.join(", ")).unwrap_or_else(|| case.tags.iter().copied().collect::<Vec<_>>().join(", "));
+        let key =
+            case.reduced.get(engine).map(|reduced| reduced.features.join(", ")).unwrap_or_else(|| case.tags.iter().copied().collect::<Vec<_>>().join(", "));
         groups.entry(key).or_default().push(case);
     }
     let mut groups: Vec<(String, Vec<&CaseResult>)> = groups.into_iter().collect();
@@ -208,7 +207,10 @@ fn engine_section(out: &mut String, cases: &[CaseResult], engine: &str, referenc
         rows.push(format!("| {feature} | {} | {} | `{}` | `{}` |", isolated.len(), failing.len(), escape(&query), escape(&error)));
     }
     if !rows.is_empty() {
-        let _ = writeln!(out, "\n## {engine}: features that fail alone\n\n| feature | isolated cases | failing | smallest failing query | error |\n|---|---|---|---|---|");
+        let _ = writeln!(
+            out,
+            "\n## {engine}: features that fail alone\n\n| feature | isolated cases | failing | smallest failing query | error |\n|---|---|---|---|---|"
+        );
         for row in rows {
             let _ = writeln!(out, "{row}");
         }

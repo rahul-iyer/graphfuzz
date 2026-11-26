@@ -179,7 +179,12 @@ fn main() -> Result<()> {
                     sentences += 1;
                 }
             }
-            println!("{} distinct sentences cover {} of {} targets", sentences, targets.iter().filter(|target| covered.contains(*target)).count(), targets.len());
+            println!(
+                "{} distinct sentences cover {} of {} targets",
+                sentences,
+                targets.iter().filter(|target| covered.contains(*target)).count(),
+                targets.len()
+            );
             Ok(())
         }
         Command::Repro { config, gql, cypher, engines } => {
@@ -219,6 +224,13 @@ fn connect_all(file: &FileConfig, config_path: &Path, schema: &Schema) -> Result
     let mut slots = Vec::new();
     for (name, config) in &file.engines {
         if !config.enabled {
+            continue;
+        }
+        if !engine::compiled_in(&config.connector) {
+            if file.reference.as_deref() == Some(name.as_str()) {
+                bail!("the reference engine '{name}' needs the {} feature; rebuild with --features {0}", config.connector);
+            }
+            eprintln!("skipping {name}: built without the {} feature (rebuild with --features {0})", config.connector);
             continue;
         }
         let profile = Profile::load(&config.dialect, &base, &config.supported, &config.unsupported, config.syntax.as_ref())?;
@@ -316,8 +328,12 @@ fn run(config_path: &Path) -> Result<()> {
             let result = checker.check(results.len(), &phase.name, &generated, &phase.targets)?;
             results.push(result);
             cases.push((generated, phase_index));
-            if results.len() % 100 == 0 {
-                let wrong = results.iter().flat_map(|case| case.verdicts.values()).filter(|verdict| matches!(verdict, Verdict::Mismatch { .. } | Verdict::Metamorphic { .. })).count();
+            if results.len().is_multiple_of(100) {
+                let wrong = results
+                    .iter()
+                    .flat_map(|case| case.verdicts.values())
+                    .filter(|verdict| matches!(verdict, Verdict::Mismatch { .. } | Verdict::Metamorphic { .. }))
+                    .count();
                 eprintln!("{}/{} cases, {} wrong answers, {:.0}s", results.len(), total, wrong, started.elapsed().as_secs_f64());
             }
         }
@@ -330,7 +346,8 @@ fn run(config_path: &Path) -> Result<()> {
         serde_json::to_writer(&mut jsonl, result)?;
         jsonl.write_all(b"\n")?;
     }
-    let restarts: Vec<String> = slots.iter().filter(|slot| slot.engine.restarts() > 0).map(|slot| format!("{} {}", slot.name, slot.engine.restarts())).collect();
+    let restarts: Vec<String> =
+        slots.iter().filter(|slot| slot.engine.restarts() > 0).map(|slot| format!("{} {}", slot.name, slot.engine.restarts())).collect();
     let header = format!(
         "Seed {}; {} cases in {:.0}s; reference {}; worker restarts: {}.\n\nConfiguration:\n\n```yaml\n{}```",
         file.seed,
@@ -406,7 +423,8 @@ fn reduce_failures(
         let original = results[index].verdicts[&engine].clone();
         let mut checker = Checker { slots: &mut *slots, reference: phase.reference, schema };
         let reduced = reduce::reduce(&generated.query, budget, |candidate| {
-            let candidate = Generated { query: candidate.clone(), tags: features::of(candidate), mutation: generated.mutation, partition: generated.partition.clone() };
+            let candidate =
+                Generated { query: candidate.clone(), tags: features::of(candidate), mutation: generated.mutation, partition: generated.partition.clone() };
             match checker.check_one(target, &candidate) {
                 Ok(verdict) => same_failure(&original, &verdict),
                 Err(_) => false,

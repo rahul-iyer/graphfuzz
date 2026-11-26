@@ -1,4 +1,0 @@
-# The DuckDB library to test: a DuckGQL build, which links the duckgql extension statically.
-[env]
-DUCKDB_LIB_DIR = "/Users/rahuliyer/duckdb-gql/build/release/src"
-DUCKDB_INCLUDE_DIR = "/Users/rahuliyer/duckdb-gql/duckdb/src/include"

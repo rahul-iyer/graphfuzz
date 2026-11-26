@@ -9,8 +9,8 @@ use serde::Deserialize;
 
 use crate::derive::Coverage;
 use crate::engine::EngineConfig;
-use crate::schema::SchemaConfig;
 use crate::generate::{FEATURES, GROUPS};
+use crate::schema::SchemaConfig;
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(default, deny_unknown_fields)]

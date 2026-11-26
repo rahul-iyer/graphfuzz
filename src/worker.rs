@@ -12,7 +12,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::value::{Row, Val};
+use crate::value::Row;
+#[cfg(any(feature = "duckgql", feature = "ladybug"))]
+use crate::value::Val;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Statement {
@@ -47,6 +49,7 @@ pub enum RunOutcome {
 }
 
 /// Answers requests, running each statement with `run`.
+#[cfg(any(feature = "duckgql", feature = "ladybug"))]
 fn serve(mut run: impl FnMut(&Statement, Duration) -> StatementResult) -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -62,8 +65,10 @@ fn serve(mut run: impl FnMut(&Statement, Duration) -> StatementResult) -> Result
 }
 
 /// The worker's main loop for one backend.
+#[cfg_attr(not(feature = "ladybug"), allow(unused_variables))]
 pub fn worker_main(backend: &str, path: Option<PathBuf>) -> Result<()> {
     match backend {
+        #[cfg(feature = "duckgql")]
         "duckgql" => {
             let connection = duckdb::Connection::open_in_memory()?;
             serve(|statement, timeout| {
@@ -81,6 +86,7 @@ pub fn worker_main(backend: &str, path: Option<PathBuf>) -> Result<()> {
                 result
             })
         }
+        #[cfg(feature = "ladybug")]
         "ladybug" => {
             let path = path.context("the Ladybug worker needs a database path")?;
             // Every worker starts from an empty database, which the parent then loads. The write-ahead log and
@@ -101,10 +107,11 @@ pub fn worker_main(backend: &str, path: Option<PathBuf>) -> Result<()> {
                 run_ladybug(&connection, statement)
             })
         }
-        other => bail!("unknown worker backend '{other}'"),
+        other => bail!("no worker backend '{other}' in this build (the embedded engines are the duckgql and ladybug features)"),
     }
 }
 
+#[cfg(feature = "duckgql")]
 fn run_duckdb(connection: &duckdb::Connection, statement: &Statement) -> StatementResult {
     if !statement.read {
         return match connection.execute_batch(&statement.sql) {
@@ -148,6 +155,7 @@ fn run_duckdb(connection: &duckdb::Connection, statement: &Statement) -> Stateme
     StatementResult::Rows { columns, rows: result }
 }
 
+#[cfg(feature = "ladybug")]
 fn run_ladybug(connection: &lbug::Connection, statement: &Statement) -> StatementResult {
     match connection.query(&statement.sql) {
         Ok(result) => {
@@ -162,6 +170,7 @@ fn run_ladybug(connection: &lbug::Connection, statement: &Statement) -> Statemen
     }
 }
 
+#[cfg(feature = "ladybug")]
 fn ladybug_value(value: lbug::Value) -> Val {
     use lbug::Value as L;
     match value {
@@ -190,13 +199,17 @@ fn ladybug_value(value: lbug::Value) -> Val {
             vec![node.get_label_name().clone()],
             node.get_properties().iter().map(|(name, value)| (name.clone(), ladybug_value(value.clone()))).collect(),
         ),
-        L::Rel(rel) => Val::relationship(
-            rel.get_label_name(),
-            rel.get_properties().iter().map(|(name, value)| (name.clone(), ladybug_value(value.clone()))).collect(),
-        ),
+        L::Rel(rel) => {
+            Val::relationship(rel.get_label_name(), rel.get_properties().iter().map(|(name, value)| (name.clone(), ladybug_value(value.clone()))).collect())
+        }
         L::RecursiveRel { rels, .. } => Val::path(
             rels.iter()
-                .map(|rel| Val::relationship(rel.get_label_name(), rel.get_properties().iter().map(|(name, value)| (name.clone(), ladybug_value(value.clone()))).collect()))
+                .map(|rel| {
+                    Val::relationship(
+                        rel.get_label_name(),
+                        rel.get_properties().iter().map(|(name, value)| (name.clone(), ladybug_value(value.clone()))).collect(),
+                    )
+                })
                 .collect(),
         ),
         other => Val::Other(format!("{other}")),

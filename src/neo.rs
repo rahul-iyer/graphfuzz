@@ -7,8 +7,8 @@ use anyhow::Result;
 use base64::Engine;
 use serde_json::{Value, json};
 
-use crate::worker::StatementResult;
 use crate::value::Val;
+use crate::worker::StatementResult;
 
 /// The error code of a request that did not reach Neo4j or whose answer could not be read.
 pub const TRANSPORT_ERROR: &str = "graphfuzz.Transport";
@@ -30,11 +30,7 @@ impl Neo {
     }
 
     fn post(&self, url: &str, statement: &str) -> Result<Value> {
-        let response = self
-            .agent
-            .post(url)
-            .header("Authorization", &self.authorization)
-            .send_json(json!({ "statement": statement }));
+        let response = self.agent.post(url).header("Authorization", &self.authorization).send_json(json!({ "statement": statement }));
         // A failed request is reported as an error result, so one oversized answer does not stop a run.
         let transport = |error: String| json!({ "errors": [{ "code": TRANSPORT_ERROR, "message": error }] });
         match response {
@@ -47,12 +43,12 @@ impl Neo {
     }
 
     fn result(body: &Value) -> StatementResult {
-        if let Some(errors) = body.get("errors").and_then(Value::as_array) {
-            if let Some(error) = errors.first() {
-                let code = error.get("code").and_then(Value::as_str).unwrap_or("");
-                let message = error.get("message").and_then(Value::as_str).unwrap_or("");
-                return StatementResult::Error(format!("{code}: {message}"));
-            }
+        if let Some(errors) = body.get("errors").and_then(Value::as_array)
+            && let Some(error) = errors.first()
+        {
+            let code = error.get("code").and_then(Value::as_str).unwrap_or("");
+            let message = error.get("message").and_then(Value::as_str).unwrap_or("");
+            return StatementResult::Error(format!("{code}: {message}"));
         }
         let data = &body["data"];
         let columns = data["fields"].as_array().map(|fields| fields.iter().filter_map(|field| field.as_str().map(String::from)).collect()).unwrap_or_default();
