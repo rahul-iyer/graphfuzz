@@ -199,7 +199,7 @@ fn mismatch_shape(target: usize, reference: usize) -> (bool, bool, std::cmp::Ord
 }
 
 /// The query with every MATCH that names no match mode set to REPEATABLE ELEMENTS; None if none changes.
-fn repeatable(original: &Query) -> Option<Query> {
+pub(crate) fn repeatable(original: &Query) -> Option<Query> {
     fn linear(linear: &mut Linear) -> bool {
         let mut changed = false;
         for clause in &mut linear.clauses {
@@ -230,7 +230,7 @@ fn repeatable(original: &Query) -> Option<Query> {
 }
 
 /// Each label expression with `A|A` and `A&A` written `A`; None if the query has none.
-fn idempotent_labels(original: &Query) -> Option<Query> {
+pub(crate) fn idempotent_labels(original: &Query) -> Option<Query> {
     fn same(left: &LabelExpr, right: &LabelExpr) -> bool {
         match (left, right) {
             (LabelExpr::Name(a), LabelExpr::Name(b)) => a == b,

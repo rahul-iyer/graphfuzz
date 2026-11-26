@@ -1,0 +1,17 @@
+graphfuzz
+Copyright (c) 2026 rahul-iyer and graphfuzz contributors
+Licensed under either of the Apache License, Version 2.0 (LICENSE-APACHE) or the MIT license
+(LICENSE-MIT), at your option.
+
+This repository includes third-party grammars, each under the Apache License, Version 2.0:
+
+- grammars/gql/GQL.g4: the OpenGQL ANTLR 4 grammar for ISO/IEC 39075:2024 (GQL),
+  https://github.com/opengql/grammar, as vendored by DuckGQL (https://github.com/rahul-iyer/duckdb-gql,
+  third_party/opengql/GQL.g4).
+- grammars/opencypher/Cypher.g4: the openCypher 9 grammar, milestone M23, Copyright (c) 2015-2023
+  "Neo Technology," Network Engine for Objects in Lund AB, from
+  https://s3.amazonaws.com/artifacts.opencypher.org/M23/Cypher.g4.
+
+Trademarks: Cypher and Neo4j are registered trademarks of Neo4j, Inc. graphfuzz is not affiliated with or
+endorsed by Neo4j, Inc. or the openCypher project; the names are used only to say which languages and
+engines graphfuzz tests. graphfuzz is a testing tool, not an implementation of Cypher or openCypher.

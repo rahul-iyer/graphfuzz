@@ -1,8 +1,40 @@
 # graphfuzz
 
-Generates graph queries from one AST, prints each in every engine's dialect, runs them on every configured
-engine, and reports where an engine disagrees with the reference engine (Neo4j by default) or with itself.
-Failing queries are reduced to minimal ones.
+A differential and metamorphic fuzzer for graph query engines that speak ISO GQL (ISO/IEC 39075) or Cypher.
+
+graphfuzz generates typed graph queries from one AST, prints each in every engine's dialect (GQL, Cypher 25,
+openCypher), runs them on every configured engine, and reports where an engine disagrees with the reference
+engine (Neo4j by default) or with itself. Failing queries are reduced to minimal ones. It also reads the
+official ANTLR grammars and tries every choice they offer.
+
+## Quickstart
+
+Ladybug against Neo4j, with nothing to build but graphfuzz:
+
+```sh
+docker compose up -d                 # Neo4j 2026.10 on localhost:7474
+cargo build --release                # with the Ladybug connector; DuckGQL is opt-in, see below
+./target/release/graphfuzz repro --config config.yml --gql "MATCH (a)-[:KNOWS]->(b) RETURN count(*) AS c0"
+./target/release/graphfuzz run --config config.yml          # writes runs/latest/report.md
+```
+
+Engines whose connector is not compiled in are skipped, with a note.
+
+## Bugs found
+
+Wrong answers graphfuzz has found, each reproducible with `graphfuzz repro` on the default fixture:
+
+| engine | query | answer | expected |
+|---|---|---|---|
+| Neo4j 2026.10.2 | `MATCH (a)-[:LOCATED_IN\|LOCATED_IN]->(b) RETURN count(*)` | 16 | 8, as `-[:LOCATED_IN]->` (see also [neo4j#14041](https://github.com/neo4j/neo4j/issues/14041)) |
+| DuckGQL | `MATCH (a)-[:KNOWS\|KNOWS]->(b) RETURN count(*)` | 40 | 20, as `-[:KNOWS]->` |
+| DuckGQL | `MATCH (n) ORDER BY n.id LIMIT 6 RETURN sum(n.id - n.population)` | 6 rows | 1 row (-74, as Neo4j): the aggregate is over the six rows |
+
+Ladybug answers both duplicated-type queries correctly (8 and 20).
+
+Not bugs, but differences the report names on their own (`match_mode`): Neo4j never uses one relationship
+twice in a MATCH (DIFFERENT RELATIONSHIPS), while DuckGQL and Ladybug may (REPEATABLE ELEMENTS, the GQL
+default), so `MATCH (a)-[]->(b), (a)-[]->(c)` has more rows on them.
 
 ## Schema and types
 
@@ -69,9 +101,15 @@ comparison operands), `values` list values of each type (fixture properties and 
 
 ## Setup
 
-- DuckGQL: `.cargo/config.toml` links the DuckGQL build's `libduckdb` (`DUCKDB_LIB_DIR`).
-- Neo4j 2026.10, for instance:
-  `docker run -d --name graphfuzz-neo4j -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/graphfuzz123 neo4j:2026.10-community`
+The embedded engines are cargo features:
+
+| feature | default | needs |
+|---|---|---|
+| `ladybug` | on | nothing; the `lbug` crate builds Ladybug |
+| `duckgql` | off | a build of [DuckGQL](https://github.com/rahul-iyer/duckdb-gql): copy `.cargo/config.toml.example` to `.cargo/config.toml` and point `DUCKDB_LIB_DIR` and `DUCKDB_INCLUDE_DIR` at it, then `cargo build --release --features duckgql` |
+
+The HTTP connectors (Neo4j, openCypher endpoints) are always built. `docker compose up -d` starts Neo4j with
+the password `config.yml` uses; leave `password` out of `config.yml` to read it from `NEO4J_PASSWORD`.
 
 ## Use
 
@@ -85,3 +123,22 @@ cargo build --release
 
 `config.yml` documents every setting: seed, engines, phases, per-feature and per-group weights, `focus`,
 `disable`, and the checks.
+
+## Development
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test                      # no engine needed
+```
+
+CI runs these without the embedded engines, with Ladybug, and a short run of Ladybug against Neo4j.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your
+option. The bundled grammars are Apache-2.0; see [NOTICE](NOTICE). Unless you state otherwise, any
+contribution you submit for inclusion is dual licensed as above, without additional terms.
+
+Cypher and Neo4j are trademarks of Neo4j, Inc.; graphfuzz is not affiliated with Neo4j or the openCypher
+project.

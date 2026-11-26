@@ -18,6 +18,8 @@ mod render;
 mod report;
 mod rng;
 mod schema;
+#[cfg(test)]
+mod tests;
 mod value;
 mod worker;
 
