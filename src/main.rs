@@ -62,6 +62,9 @@ enum Command {
         /// Print the features each query uses after it.
         #[arg(long)]
         tags: bool,
+        /// Overrides the configuration's seed, which also decides a random schema and its fixture.
+        #[arg(long)]
+        seed: Option<u64>,
     },
     /// List the features and feature groups the configuration can name.
     Features,
@@ -69,6 +72,9 @@ enum Command {
     Run {
         #[arg(long, default_value = "config.yml")]
         config: PathBuf,
+        /// Overrides the configuration's seed, which also decides a random schema and its fixture.
+        #[arg(long)]
+        seed: Option<u64>,
     },
     /// Run one query on the configured engines over the seed's fixture and print every answer.
     Repro {
@@ -83,6 +89,9 @@ enum Command {
         /// Only these engines, comma-separated.
         #[arg(long)]
         engines: Option<String>,
+        /// Overrides the configuration's seed, which also decides a random schema and its fixture.
+        #[arg(long)]
+        seed: Option<u64>,
     },
     /// Run only the configured grammars' systematic sentences.
     Grammar {
@@ -122,8 +131,8 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Generate { config, dialect, count, tags } => {
-            let file = FileConfig::load(config.as_deref())?;
+        Command::Generate { config, dialect, count, tags, seed } => {
+            let file = FileConfig::load_seeded(config.as_deref(), seed)?;
             let base = config.as_deref().and_then(Path::parent).unwrap_or(Path::new(".")).to_path_buf();
             let profile = Profile::load(&dialect, &base, &[], &[], None)?;
             let gql = profile.name == "gql";
@@ -131,7 +140,7 @@ fn main() -> Result<()> {
             if !gql {
                 exclude.extend(IMPLEMENTATION_DEFINED);
             }
-            let schema = file.schema.build(gql)?;
+            let schema = file.schema.build(gql)?.with_values(file.seed);
             let config = Config { exclude, undirected: gql, isolate: None, weights: file.weights()? };
             let mut generator = Gen::new(file.seed, &schema, &config);
             for _ in 0..count {
@@ -143,7 +152,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::Run { config } => run(&config),
+        Command::Run { config, seed } => run(&config, seed),
         Command::Grammar { config } => {
             let file = FileConfig::load(Some(&config))?;
             fs::create_dir_all(&file.out)?;
@@ -189,8 +198,8 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Command::Repro { config, gql, cypher, engines } => {
-            let file = FileConfig::load(Some(&config))?;
+        Command::Repro { config, gql, cypher, engines, seed } => {
+            let file = FileConfig::load_seeded(Some(&config), seed)?;
             let only: Option<BTreeSet<String>> = engines.map(|names| names.split(',').map(|name| name.trim().to_string()).collect());
             let schema = file.schema.build(false)?;
             let mut slots = connect_all(&file, &config, &schema)?;
@@ -270,12 +279,13 @@ struct Phase {
     reference: Option<usize>,
 }
 
-fn run(config_path: &Path) -> Result<()> {
-    let file = FileConfig::load(Some(config_path))?;
+fn run(config_path: &Path, seed: Option<u64>) -> Result<()> {
+    let file = FileConfig::load_seeded(Some(config_path), seed)?;
     fs::create_dir_all(&file.out)?;
     let started = Instant::now();
-    let compared = file.schema.build(false)?;
-    let undirected = file.schema.build(true)?;
+    let compared = file.schema.build(false)?.with_values(file.seed);
+    let undirected = file.schema.build(true)?.with_values(file.seed);
+    eprintln!("seed {}; repeat this run with --seed {0}\nschema:\n{}", file.seed, undirected.describe());
     let weights = file.weights()?;
     let mut slots = connect_all(&file, config_path, &compared)?;
     let names: Vec<String> = slots.iter().map(|slot| slot.name.clone()).collect();
@@ -369,12 +379,13 @@ fn run(config_path: &Path) -> Result<()> {
     let restarts: Vec<String> =
         slots.iter().filter(|slot| slot.engine.restarts() > 0).map(|slot| format!("{} {}", slot.name, slot.engine.restarts())).collect();
     let header = format!(
-        "Seed {}; {} cases in {:.0}s; reference {}; worker restarts: {}.\n\nConfiguration:\n\n```yaml\n{}```",
+        "Seed {}; {} cases in {:.0}s; reference {}; worker restarts: {}. Repeat with `graphfuzz run --seed {0}`.\n\nSchema:\n\n{}\n\nConfiguration:\n\n```yaml\n{}```",
         file.seed,
         results.len(),
         started.elapsed().as_secs_f64(),
         file.reference.as_deref().unwrap_or("none"),
         if restarts.is_empty() { "none".to_string() } else { restarts.join(", ") },
+        undirected.describe(),
         file.raw
     );
     let target_names: Vec<String> = targets.iter().map(|index| names[*index].clone()).collect();

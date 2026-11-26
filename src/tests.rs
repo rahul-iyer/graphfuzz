@@ -164,3 +164,31 @@ fn isolating_a_feature_leaves_temporal_literals_out() {
         }
     }
 }
+
+#[test]
+fn random_schemas_are_valid_and_avoid_keywords() {
+    // A name that is a keyword in either grammar breaks an engine's parser; GQL's PRODUCT did.
+    let keywords: BTreeSet<String> = ["grammars/gql/GQL.g4", "grammars/opencypher/Cypher.g4"]
+        .iter()
+        .flat_map(|path| {
+            std::fs::read_to_string(path).unwrap().lines().filter_map(|line| line.split(':').next().map(|name| name.trim().to_string())).collect::<Vec<_>>()
+        })
+        .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
+        .collect();
+    for seed in 0..50 {
+        let file = crate::config::FileConfig::load_seeded(Some(Path::new("config.yml")), Some(seed)).unwrap();
+        let schema = file.schema.build(true).unwrap().with_values(seed);
+        assert!(schema.edges.iter().any(|edge| edge.source == edge.target), "seed {seed}: no self-loop edge type");
+        let names = schema
+            .nodes
+            .iter()
+            .map(|node| node.label)
+            .chain(schema.edges.iter().map(|edge| edge.label))
+            .chain(schema.nodes.iter().flat_map(|node| node.props.iter().map(|prop| prop.name)))
+            .chain(schema.edges.iter().flat_map(|edge| edge.props.iter().map(|prop| prop.name)));
+        for name in names {
+            assert!(!keywords.contains(&name.to_uppercase()), "seed {seed}: {name} is a keyword");
+        }
+        assert!(!schema.values.is_empty());
+    }
+}

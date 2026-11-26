@@ -115,6 +115,26 @@ pub struct CaseResult {
     pub verdicts: BTreeMap<String, Verdict>,
     /// The smallest query found that fails the same way, by engine name.
     pub reduced: BTreeMap<String, Reduced>,
+    /// How many rows the reference returned, for a query it answered.
+    pub rows: Option<usize>,
+    /// How many bindings the query's clauses produce on the reference, below its RETURN: zero means the
+    /// patterns matched nothing, however many rows an aggregate then returns.
+    pub bindings: Option<u64>,
+}
+
+/// The query's clauses with `RETURN count(*)` in place of its RETURN: how many bindings they produce.
+pub(crate) fn counted(clauses: &[Clause]) -> Query {
+    Query::Linear(Linear {
+        clauses: clauses.to_vec(),
+        tail: Tail::Return(Return {
+            distinct: false,
+            items: ReturnItems::Items(vec![(Expr::Agg { name: "count".to_string(), distinct: false, arg: None }, Some("c0".to_string()))]),
+            group_by: vec![],
+            order: vec![],
+            offset: None,
+            limit: None,
+        }),
+    })
 }
 
 pub fn classify(message: &str) -> ErrorKind {
@@ -433,19 +453,6 @@ impl Slot {
         // A|A and A&A match what A matches. Counted below the RETURN, so a filter or aggregate cannot hide
         // rows matched twice.
         if let Some(Query::Linear(simpler)) = idempotent_labels(&generated.query) {
-            let counted = |clauses: &[Clause]| {
-                Query::Linear(Linear {
-                    clauses: clauses.to_vec(),
-                    tail: Tail::Return(Return {
-                        distinct: false,
-                        items: ReturnItems::Items(vec![(Expr::Agg { name: "count".to_string(), distinct: false, arg: None }, Some("c0".to_string()))]),
-                        group_by: vec![],
-                        order: vec![],
-                        offset: None,
-                        limit: None,
-                    }),
-                })
-            };
             let (original, variant) = (counted(&linear.clauses), counted(&simpler.clauses));
             if let (Some(before), Some(after)) = (self.rows(&original), self.rows(&variant))
                 && before != after
@@ -500,6 +507,8 @@ impl<'a> Checker<'a> {
             queries: BTreeMap::new(),
             verdicts: BTreeMap::new(),
             reduced: BTreeMap::new(),
+            rows: None,
+            bindings: None,
         };
         let reference = match self.reference {
             Some(index)
@@ -514,6 +523,21 @@ impl<'a> Checker<'a> {
                         result.verdicts.insert(self.slots[target].name.clone(), Verdict::Skipped(format!("reference unreachable: {message}")));
                     }
                     return Ok(result);
+                }
+                if !generated.mutation
+                    && let Some(rows) = outcomes.first().and_then(Outcome::rows)
+                {
+                    result.rows = Some(rows.len());
+                    // Not while reducing: only the verdict matters there.
+                    if phase != "reduce"
+                        && let Query::Linear(linear) = &generated.query
+                        && !linear.clauses.is_empty()
+                    {
+                        result.bindings = slot.rows(&counted(&linear.clauses)).and_then(|rows| match rows.first().and_then(|row| row.first()) {
+                            Some(Val::Num(count)) if *count >= 0.0 => Some(*count as u64),
+                            _ => None,
+                        });
+                    }
                 }
                 Some(outcomes)
             }

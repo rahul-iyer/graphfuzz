@@ -92,6 +92,34 @@ pub fn markdown(cases: &[CaseResult], header: &str, engines: &[String], referenc
         "\n`agree`: same rows as the reference. `rejects`: an error where the reference answered. `unchecked_*`: the reference cannot express the case. `unsupported`: the engine's dialect cannot. `match_mode`: differs from the reference only in whether one MATCH may reuse an edge."
     );
 
+    // Whether queries reach the data: a query whose patterns bind nothing tests little beyond its parser.
+    let measured: Vec<&CaseResult> = cases.iter().filter(|case| case.bindings.is_some()).collect();
+    if !measured.is_empty() {
+        let empty: Vec<&CaseResult> = measured.iter().copied().filter(|case| case.bindings == Some(0)).collect();
+        let _ = writeln!(
+            out,
+            "\n## Data reached\n\nOf {} queries the reference answered, {} ({:.0}%) bound nothing: their patterns and filters matched no data.\n",
+            measured.len(),
+            empty.len(),
+            100.0 * empty.len() as f64 / measured.len() as f64
+        );
+        let _ = writeln!(out, "| phase | queries | bound nothing | median bindings |\n|---|---|---|---|");
+        let mut phases: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
+        for case in &measured {
+            let phase = case.phase.split(':').next().unwrap_or(&case.phase);
+            phases.entry(phase).or_default().push(case.bindings.unwrap_or(0));
+        }
+        for (phase, mut counts) in phases {
+            counts.sort_unstable();
+            let zero = counts.iter().filter(|count| **count == 0).count();
+            let median = counts.get(counts.len() / 2).copied().unwrap_or(0);
+            let _ = writeln!(out, "| {phase} | {} | {zero} ({:.0}%) | {median} |", counts.len(), 100.0 * zero as f64 / counts.len() as f64);
+        }
+        if !empty.is_empty() {
+            let _ = writeln!(out, "\nFeatures over-represented among queries that bound nothing: {}", overrepresented(&empty, cases));
+        }
+    }
+
     for engine in engines {
         engine_section(&mut out, cases, engine, reference_name);
     }

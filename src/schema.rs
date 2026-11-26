@@ -93,19 +93,52 @@ pub struct EdgeType {
     pub target: &'static str,
     pub undirected: bool,
     pub props: Vec<Prop>,
+    /// How many edges of this type the fixture has.
+    pub count: i64,
 }
 
 pub struct Schema {
     pub nodes: Vec<NodeType>,
     pub edges: Vec<EdgeType>,
+    /// The values the fixture holds, by element label and property, so generated filters compare with data
+    /// that exists; empty until `with_values`.
+    pub values: BTreeMap<(&'static str, &'static str), Vec<Lit>>,
 }
 
 /// The `schema:` section of config.yml. A property type is written as `INT64` or `INT64 NOT NULL`.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SchemaConfig {
+    #[serde(default)]
     pub nodes: BTreeMap<String, NodeConfig>,
+    #[serde(default)]
     pub edges: BTreeMap<String, EdgeConfig>,
+    /// Adds random node types, edge types, and properties to the declared ones, and draws every type's count
+    /// and density, all from the seed; see `randomized`.
+    #[serde(default)]
+    pub random: Option<RandomSchema>,
+}
+
+/// Ranges, inclusive, that a random schema is drawn from.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(default, deny_unknown_fields)]
+pub struct RandomSchema {
+    /// Node types added to the declared ones.
+    pub node_types: [usize; 2],
+    /// Edge types added to the declared ones; at least one goes from a node type to itself.
+    pub edge_types: [usize; 2],
+    /// Properties added to each node and edge type.
+    pub properties: [usize; 2],
+    /// Nodes of each type.
+    pub nodes: [i64; 2],
+    /// Edges of each type per node of its source type.
+    pub degree: [i64; 2],
+}
+
+impl Default for RandomSchema {
+    fn default() -> Self {
+        RandomSchema { node_types: [1, 3], edge_types: [2, 5], properties: [0, 3], nodes: [3, 15], degree: [1, 3] }
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -127,6 +160,9 @@ pub struct EdgeConfig {
     pub undirected: bool,
     #[serde(default)]
     pub properties: BTreeMap<String, String>,
+    /// How many edges of this type the fixture has; by default twice its source type's count, at most 20.
+    #[serde(default)]
+    pub count: Option<i64>,
 }
 
 fn node_count() -> i64 {
@@ -201,15 +237,88 @@ edges:
                     bail!("edge type {label} names node type {endpoint}, which the schema does not declare");
                 }
             }
+            let source_count = self.nodes[&edge.from].count.max(1);
             edges.push(EdgeType {
                 label: leak(label),
                 source: leak(&edge.from),
                 target: leak(&edge.to),
                 undirected: edge.undirected,
                 props: properties(&edge.properties, false)?,
+                count: edge.count.unwrap_or((source_count * 2).min(20)).max(0),
             });
         }
-        Ok(Schema { nodes, edges })
+        // One name, one type: DuckGQL keeps a property name to one type across the graph, and a query reading a
+        // property of an unlabeled element must mean one type.
+        let mut types: BTreeMap<&str, Ty> = BTreeMap::new();
+        for prop in nodes.iter().flat_map(|node| node.props.iter()).chain(edges.iter().flat_map(|edge| edge.props.iter())) {
+            if let Some(ty) = types.insert(prop.name, prop.ty)
+                && ty != prop.ty
+            {
+                bail!("property {} has two types, {} and {}; give each name one type", prop.name, ty.gql_name(), prop.ty.gql_name());
+            }
+        }
+        Ok(Schema { nodes, edges, values: BTreeMap::new() })
+    }
+
+    /// The declared schema with random node types, edge types, and properties added, and every type's count and
+    /// density drawn, all from the seed; the same seed gives the same schema. Without `random`, the schema itself.
+    pub fn randomized(&self, seed: u64) -> SchemaConfig {
+        let Some(random) = &self.random else { return self.clone() };
+        let mut rng = Rng::new(seed ^ 0x5c4e_3a00_0000_0002);
+        let draw = |range: [i64; 2], rng: &mut Rng| rng.range(range[0].min(range[1]), range[0].max(range[1]));
+        let mut result = SchemaConfig { nodes: self.nodes.clone(), edges: self.edges.clone(), random: None };
+        // Every property name keeps one type: the declared ones as declared, new ones drawn once.
+        let mut types: BTreeMap<String, String> = BTreeMap::new();
+        for properties in result.nodes.values().map(|node| &node.properties).chain(result.edges.values().map(|edge| &edge.properties)) {
+            for (name, ty) in properties {
+                types.entry(name.clone()).or_insert_with(|| ty.to_uppercase().trim_end_matches("NOT NULL").trim().to_string());
+            }
+        }
+        const TYPES: [&str; 8] = ["INT64", "FLOAT64", "STRING", "BOOL", "DATE", "LOCAL DATETIME", "ZONED DATETIME", "DECIMAL"];
+        for name in ["rank", "level", "rating", "price", "amount", "title", "code", "flag", "created", "updated", "tier", "region"] {
+            types.entry(name.to_string()).or_insert_with(|| rng.pick(&TYPES).to_string());
+        }
+        let names: Vec<String> = types.keys().filter(|name| name.as_str() != "id").cloned().collect();
+        let add_properties = |properties: &mut BTreeMap<String, String>, rng: &mut Rng| {
+            let extra = draw([random.properties[0] as i64, random.properties[1] as i64], rng);
+            for _ in 0..extra {
+                let name = rng.pick(&names).clone();
+                let ty = types[&name].clone();
+                properties.entry(name).or_insert(ty);
+            }
+        };
+        let node_names = ["Account", "Item", "Device", "Post", "Forum", "Movie", "Topic", "Team", "Venue", "Region"];
+        let added = draw([random.node_types[0] as i64, random.node_types[1] as i64], &mut rng);
+        let fresh: Vec<&str> = node_names.iter().copied().filter(|name| !result.nodes.contains_key(*name)).take(added as usize).collect();
+        for name in fresh {
+            let mut properties = BTreeMap::from([("id".to_string(), "INT64 NOT NULL".to_string())]);
+            add_properties(&mut properties, &mut rng);
+            result.nodes.insert(name.to_string(), NodeConfig { count: 1, properties });
+        }
+        for node in result.nodes.values_mut() {
+            node.count = draw(random.nodes, &mut rng).max(1);
+            add_properties(&mut node.properties, &mut rng);
+        }
+        let labels: Vec<String> = result.nodes.keys().cloned().collect();
+        let edge_names = ["OWNS", "LIKES", "FOLLOWS", "BOUGHT", "TAGGED", "MEMBER_OF", "LINKS", "REPLIES_TO", "USES", "HOSTS"];
+        let added = draw([random.edge_types[0] as i64, random.edge_types[1] as i64], &mut rng);
+        let fresh: Vec<&str> = edge_names.iter().copied().filter(|name| !result.edges.contains_key(*name)).take(added as usize).collect();
+        for (index, name) in fresh.into_iter().enumerate() {
+            let from = rng.pick(&labels).clone();
+            // The first is a self-loop type, so quantified paths always have one to repeat over.
+            let to = if index == 0 { from.clone() } else { rng.pick(&labels).clone() };
+            let mut properties = BTreeMap::new();
+            add_properties(&mut properties, &mut rng);
+            result.edges.insert(name.to_string(), EdgeConfig { from, to, undirected: false, properties, count: None });
+        }
+        for edge in result.edges.values_mut() {
+            let sources = result.nodes[&edge.from].count;
+            edge.count = Some((sources * draw(random.degree, &mut rng)).clamp(1, 60));
+            if edge.properties.len() < 3 {
+                add_properties(&mut edge.properties, &mut rng);
+            }
+        }
+        result
     }
 }
 
@@ -238,6 +347,30 @@ impl Schema {
 
     pub fn edge(&self, label: &str) -> &EdgeType {
         self.edges.iter().find(|edge| edge.label == label).expect("unknown edge label")
+    }
+
+    /// The schema with the values the seed's fixture holds, for generators that compare with data.
+    pub fn with_values(mut self, seed: u64) -> Schema {
+        let fixture = self.fixture(seed);
+        let mut values: BTreeMap<(&'static str, &'static str), Vec<Lit>> = BTreeMap::new();
+        for (label, props) in fixture.nodes.iter().map(|node| (node.label, &node.props)).chain(fixture.edges.iter().map(|edge| (edge.label, &edge.props))) {
+            for (name, value) in props {
+                values.entry((label, *name)).or_default().push(value.clone());
+            }
+        }
+        self.values = values;
+        self
+    }
+
+    /// A short description, one line per type, for the report.
+    pub fn describe(&self) -> String {
+        let props = |props: &[Prop]| props.iter().map(|prop| format!("{} {}", prop.name, prop.ty.gql_name())).collect::<Vec<_>>().join(", ");
+        let mut lines: Vec<String> = self.nodes.iter().map(|node| format!("- ({}) x{}: {}", node.label, node.count, props(&node.props))).collect();
+        lines.extend(self.edges.iter().map(|edge| {
+            let arrow = if edge.undirected { "~" } else { "->" };
+            format!("- ({})-[{}]{}({}) x{}: {}", edge.source, edge.label, arrow, edge.target, edge.count, props(&edge.props))
+        }));
+        lines.join("\n")
     }
 
     /// The property types any node or edge has, so the generator writes values of those types.
@@ -299,8 +432,7 @@ impl Schema {
         }
         let count_of = |label: &str| self.node(label).count;
         for edge in &self.edges {
-            let edge_count = (count_of(edge.source) * 2).min(20);
-            for _ in 0..edge_count {
+            for _ in 0..edge.count {
                 let source = rng.range(1, count_of(edge.source));
                 let target = rng.range(1, count_of(edge.target));
                 let mut props = Vec::new();

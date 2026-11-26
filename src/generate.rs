@@ -696,7 +696,10 @@ impl<'a> Gen<'a> {
                 ways
             })
             .collect();
-        let (index, backwards) = if candidates.is_empty() { (0, false) } else { *self.rng.pick(&candidates) };
+        // An edge drawn leftwards is one whose target is this node: flipping an outgoing type would match nothing.
+        let incoming: Vec<(usize, bool)> = candidates.iter().copied().filter(|(_, backwards)| *backwards).collect();
+        let pool = if !incoming.is_empty() && self.want("edge_left", 0.1) { incoming } else { candidates };
+        let (index, backwards) = if pool.is_empty() { (0, false) } else { *self.rng.pick(&pool) };
         let edge_type = &self.schema.edges[index];
         let next = if backwards { edge_type.source } else { edge_type.target };
         let mut dir = if edge_type.undirected {
@@ -724,8 +727,14 @@ impl<'a> Gen<'a> {
         let mut label = Some(LabelExpr::Name(edge_type.label.to_string()));
         let mut next_label = Some(next);
         if quant.is_some() && !quantifiable {
-            let loops: Vec<(&'static str, &'static str)> =
-                self.schema.edges.iter().filter(|edge| edge.source == edge.target && !edge.undirected).map(|edge| (edge.label, edge.source)).collect();
+            // A self-loop type that starts where this hop does; another would match nothing from here.
+            let loops: Vec<(&'static str, &'static str)> = self
+                .schema
+                .edges
+                .iter()
+                .filter(|edge| edge.source == edge.target && !edge.undirected && from.is_none_or(|from| from == edge.source))
+                .map(|edge| (edge.label, edge.source))
+                .collect();
             if loops.is_empty() {
                 quant = None;
             } else {
@@ -736,10 +745,7 @@ impl<'a> Gen<'a> {
             }
         }
         if !edge_type.undirected {
-            if self.want("edge_left", 0.1) {
-                dir = Dir::Left;
-                next_label = if quant.is_some() { next_label } else { None };
-            } else if self.want("edge_any", 0.1) {
+            if self.want("edge_any", 0.1) {
                 dir = Dir::Any;
                 next_label = if quant.is_some() { next_label } else { None };
             } else if self.want("edge_left_or_right", 0.03) {
@@ -816,11 +822,16 @@ impl<'a> Gen<'a> {
             label_expr = Some(LabelExpr::Or(Box::new(label_expr.unwrap_or(LabelExpr::Wildcard)), Box::new(LabelExpr::Name(other.to_string()))));
             known = None;
         } else if self.want("label_not", 0.03) {
-            label_expr = Some(LabelExpr::Not(Box::new(LabelExpr::Name(self.rng.pick(&self.schema.nodes).label.to_string()))));
+            // Excluding the label the path needs here would match nothing, so another one is excluded.
+            let others: Vec<&'static str> = self.schema.nodes.iter().map(|node| node.label).filter(|other| Some(*other) != label).collect();
+            let excluded = if others.is_empty() { self.rng.pick(&self.schema.nodes).label } else { *self.rng.pick(&others) };
+            label_expr = Some(LabelExpr::Not(Box::new(LabelExpr::Name(excluded.to_string()))));
             known = None;
-        } else if self.want("label_and", 0.02) {
-            let name = label.unwrap_or(self.schema.nodes[0].label).to_string();
-            label_expr = Some(LabelExpr::And(Box::new(LabelExpr::Name(name.clone())), Box::new(LabelExpr::Name(name))));
+        } else if let Some(name) = label
+            && self.want("label_and", 0.02)
+        {
+            // Only over a label the path allows here: another one would match nothing.
+            label_expr = Some(LabelExpr::And(Box::new(LabelExpr::Name(name.to_string())), Box::new(LabelExpr::Name(name.to_string()))));
         } else if self.want("label_wildcard", 0.02) {
             label_expr = Some(LabelExpr::Wildcard);
             known = None;
@@ -834,7 +845,9 @@ impl<'a> Gen<'a> {
         };
         let mut props = Vec::new();
         if self.want("property_map", 0.04) {
-            props.push(("id".to_string(), Expr::Lit(Lit::Int(self.rng.range(1, 5)))));
+            // An id the label's nodes have, or one most labels have.
+            let most = known.map(|label| self.schema.node(label).count).unwrap_or_else(|| self.schema.nodes.iter().map(|node| node.count).min().unwrap_or(1));
+            props.push(("id".to_string(), Expr::Lit(Lit::Int(self.rng.range(1, most.max(1))))));
         }
         let filter = if var.is_some() && self.want("element_where", 0.05) { Some(self.bool_expr(1)) } else { None };
         NodePat { var, label: label_expr, props, filter }
@@ -1120,7 +1133,8 @@ impl<'a> Gen<'a> {
 
     fn list_expr(&mut self, ty: Ty) -> Expr {
         self.tags.insert(feature_name("list"));
-        let count = self.rng.range(0, 3);
+        // An empty list is a case worth having, but a FOR over one binds nothing, so it is rare.
+        let count = if self.rng.chance(0.1) { 0 } else { self.rng.range(1, 3) };
         Expr::List((0..count).map(|_| self.leaf(ty)).collect())
     }
 
@@ -1165,7 +1179,12 @@ impl<'a> Gen<'a> {
                     }
                     "is_normalized" => Some(Expr::Normalized(Box::new(self.str_expr(0)), self.rng.chance(0.3))),
                     "is_labeled" => nodes.first().map(|node| {
-                        Expr::Labeled(node.name.clone(), LabelExpr::Name(self.rng.pick(&self.schema.nodes).label.to_string()), self.rng.chance(0.3))
+                        // Half the time the label the node was matched with, so the test is not always false.
+                        let own = match node.kind {
+                            Kind::Node(Some(label)) if self.rng.chance(0.5) => label,
+                            _ => self.rng.pick(&self.schema.nodes).label,
+                        };
+                        Expr::Labeled(node.name.clone(), LabelExpr::Name(own.to_string()), self.rng.chance(0.3))
                     }),
                     "is_directed" => edges.first().map(|edge| Expr::Directed(edge.name.clone(), self.rng.chance(0.3))),
                     "source_of" => match (nodes.first(), edges.first()) {
@@ -1223,16 +1242,74 @@ impl<'a> Gen<'a> {
         comparison
     }
 
+    /// A comparison that mostly splits the rows rather than keeping all or none: it reads a property of a bound
+    /// element and compares it with a value the data holds for that property. Comparisons of two literals, of
+    /// an expression with itself, and with NULL still occur, but rarely, since they bind all rows or none.
     fn comparison(&mut self, depth: u32) -> Expr {
         let op = *self.rng.pick(&[BinOp::Eq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge]);
-        let ty = self.pick_type();
+        let mut ty = self.pick_type();
+        // Without a value of the type in scope, both sides would be literals (or NULL, for a temporal type).
+        if !self.scope_has(ty) && self.rng.chance(0.9) {
+            ty = [Ty::Int, Ty::Str, Ty::Float, Ty::Bool].into_iter().find(|ty| self.scope_has(*ty)).unwrap_or(ty);
+        }
         let child = depth.saturating_sub(1);
-        let (left, right) = match ty {
-            Ty::Bool => (self.leaf(Ty::Bool), Expr::Lit(Lit::Bool(self.rng.chance(0.5)))),
-            other => (self.expr_of(other, child), self.expr_of(other, 0)),
+        let reads_data = self.rng.chance(0.95);
+        let left = if reads_data { (0..4).find_map(|_| self.property(ty)) } else { None };
+        let left = left.unwrap_or_else(|| if ty == Ty::Bool { self.leaf(Ty::Bool) } else { self.expr_of(ty, child) });
+        let from_data = match &left {
+            // Literals of these types almost never equal a value in the data.
+            Expr::Prop(var, prop) if self.rng.chance(0.9) || matches!(ty, Ty::Float | Ty::Decimal) || ty.temporal() => {
+                self.data_value(var, prop).map(Expr::Lit)
+            }
+            _ => None,
         };
+        let right = from_data.unwrap_or_else(|| {
+            // Anything but the left side again, unless nothing else comes up.
+            let mut right = if ty == Ty::Bool { Expr::Lit(Lit::Bool(self.rng.chance(0.5))) } else { self.expr_of(ty, 0) };
+            for _ in 0..3 {
+                if format!("{right:?}") != format!("{left:?}") || self.rng.chance(0.05) {
+                    break;
+                }
+                right = self.expr_of(ty, 0);
+            }
+            right
+        });
         let op = if ty == Ty::Bool { *self.rng.pick(&[BinOp::Eq, BinOp::Ne]) } else { op };
         Expr::Bin(op, Box::new(left), Box::new(right))
+    }
+
+    /// Whether some element or value in scope has a value of this type to read.
+    fn scope_has(&self, ty: Ty) -> bool {
+        let has = |props: &[crate::schema::Prop]| props.iter().any(|prop| prop.ty == ty);
+        self.scope.iter().any(|var| match &var.kind {
+            Kind::Node(Some(label)) => has(&self.schema.node(label).props),
+            Kind::Edge(Some(label)) => has(&self.schema.edge(label).props),
+            Kind::Node(None) => self.schema.nodes.iter().any(|node| has(&node.props)),
+            Kind::Edge(None) => self.schema.edges.iter().any(|edge| has(&edge.props)),
+            Kind::Value(value) => *value == ty,
+            _ => false,
+        })
+    }
+
+    /// A value the fixture holds for `var.prop`, whatever label `var` matched.
+    fn data_value(&mut self, var: &str, prop: &str) -> Option<Lit> {
+        let kind = self.scope.iter().find(|candidate| candidate.name == var)?.kind.clone();
+        let values: Vec<&Lit> = self
+            .schema
+            .values
+            .iter()
+            .filter(|((label, name), _)| {
+                *name == prop
+                    && match &kind {
+                        Kind::Node(Some(bound)) | Kind::Edge(Some(bound)) => bound == label,
+                        Kind::Node(None) => self.schema.nodes.iter().any(|node| node.label == *label),
+                        Kind::Edge(None) => self.schema.edges.iter().any(|edge| edge.label == *label),
+                        _ => false,
+                    }
+            })
+            .flat_map(|(_, values)| values.iter())
+            .collect();
+        if values.is_empty() { None } else { Some((*self.rng.pick(&values)).clone()) }
     }
 
     // ---------------------------------------------------------------- data modification

@@ -191,10 +191,31 @@ fn expand(name: &str) -> Result<Vec<&'static str>> {
 
 impl FileConfig {
     pub fn load(path: Option<&Path>) -> Result<FileConfig> {
+        FileConfig::load_seeded(path, None)
+    }
+
+    /// Loads a configuration; `seed` overrides the file's. `seed: random` in the file draws one from the clock,
+    /// and a random schema is drawn from whichever seed results, so `--seed` repeats a run exactly.
+    pub fn load_seeded(path: Option<&Path>, seed: Option<u64>) -> Result<FileConfig> {
         let Some(path) = path else { return Ok(FileConfig::default()) };
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let mut config: FileConfig = serde_yaml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let mut value: serde_yaml::Value = serde_yaml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        if let serde_yaml::Value::Mapping(map) = &mut value {
+            let drawn = match (seed, map.get("seed")) {
+                (Some(seed), _) => Some(seed),
+                (None, Some(serde_yaml::Value::String(word))) if word == "random" => {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                    Some(now.as_nanos() as u64 % 1_000_000_000)
+                }
+                _ => None,
+            };
+            if let Some(seed) = drawn {
+                map.insert("seed".into(), seed.into());
+            }
+        }
+        let mut config: FileConfig = serde_yaml::from_value(value).with_context(|| format!("parsing {}", path.display()))?;
         config.raw = text;
+        config.schema = config.schema.randomized(config.seed);
         if config.out.is_relative() {
             config.out = path.parent().unwrap_or(Path::new(".")).join(&config.out);
         }

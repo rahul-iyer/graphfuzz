@@ -24,12 +24,14 @@ Engines whose connector is not compiled in are skipped, with a note.
 
 ## Bugs found
 
-Wrong answers graphfuzz has found, each reproducible with `graphfuzz repro` on the default fixture:
+Wrong answers graphfuzz has found, each reproducible with `graphfuzz repro --seed 1` on the declared schema (the
+counts below; remove `random:` from the schema in `config.yml`), and in shape on any seed:
 
 | engine | query | answer | expected |
 |---|---|---|---|
 | Neo4j 2026.10.2 | `MATCH (a)-[:LOCATED_IN\|LOCATED_IN]->(b) RETURN count(*)` | 16 | 8, as `-[:LOCATED_IN]->` (see also [neo4j#14041](https://github.com/neo4j/neo4j/issues/14041)) |
 | DuckGQL | `MATCH (a)-[:KNOWS\|KNOWS]->(b) RETURN count(*)` | 40 | 20, as `-[:KNOWS]->` |
+| DuckGQL | `MATCH (a:Person)-[:KNOWS]->(a) RETURN count(*)` (`--seed 11`, random schema) | 30, every KNOWS edge | 2, the edges from a node to itself |
 | DuckGQL | `MATCH (n) ORDER BY n.id LIMIT 6 RETURN sum(n.id - n.population)` | 6 rows | 1 row (-74, as Neo4j): the aggregate is over the six rows |
 | Ladybug (`lbug` 0.22.3) | `RETURN count(DISTINCT NULL)` | assertion failure, `UNREACHABLE_CODE` in `types.cpp` | 0 |
 | Ladybug (`lbug` 0.22.3) | `MATCH (n:Company) RETURN count(NULL)` | "Trying to a create a vector with ANY type" | 0 |
@@ -44,6 +46,13 @@ twice in a MATCH (DIFFERENT RELATIONSHIPS), while DuckGQL and Ladybug may (REPEA
 default), so `MATCH (a)-[]->(b), (a)-[]->(c)` has more rows on them.
 
 ## Schema and types
+
+Each run draws its schema and data from the seed. `seed: random` picks a new seed every run; the log and the
+report print it, and `graphfuzz run --seed N` (also `repro` and `generate`) repeats that run exactly. With
+`schema.random`, the declared types below are extended with random node types, edge types (one always from a
+type to itself), and properties, and every type's node count and edge density is drawn; the report lists the
+schema it used. Filters compare properties with values the fixture holds, so most queries bind data: the
+report's *Data reached* section says how many bound nothing.
 
 The `schema:` section of `config.yml` declares the graph: node and edge types with typed properties (INT64,
 FLOAT64, STRING, BOOL, DATE, LOCAL DATETIME, ZONED DATETIME, DECIMAL). It becomes each engine's schema
