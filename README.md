@@ -31,6 +31,8 @@ Wrong answers graphfuzz has found, each reproducible with `graphfuzz repro` on t
 | Neo4j 2026.10.2 | `MATCH (a)-[:LOCATED_IN\|LOCATED_IN]->(b) RETURN count(*)` | 16 | 8, as `-[:LOCATED_IN]->` (see also [neo4j#14041](https://github.com/neo4j/neo4j/issues/14041)) |
 | DuckGQL | `MATCH (a)-[:KNOWS\|KNOWS]->(b) RETURN count(*)` | 40 | 20, as `-[:KNOWS]->` |
 | DuckGQL | `MATCH (n) ORDER BY n.id LIMIT 6 RETURN sum(n.id - n.population)` | 6 rows | 1 row (-74, as Neo4j): the aggregate is over the six rows |
+| Ladybug (`lbug` 0.22.3) | `RETURN count(DISTINCT NULL)` | assertion failure, `UNREACHABLE_CODE` in `types.cpp` | 0 |
+| Ladybug (`lbug` 0.22.3) | `MATCH (n:Company) RETURN count(NULL)` | "Trying to a create a vector with ANY type" | 0 |
 
 Ladybug answers both duplicated-type queries correctly (8 and 20).
 

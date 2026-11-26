@@ -793,8 +793,14 @@ impl<'a> Gen<'a> {
             && self.want("property_map", 0.03)
             && let Some(LabelExpr::Name(name)) = &label
             && let Some(prop) = self.schema.edge(name).props.first()
+            && self.literal_allowed(prop.ty)
         {
-            props.push((prop.name.to_string(), Expr::Lit(Lit::Int(self.rng.range(1, 30)))));
+            // A value of the property's type: a small integer, as the fixture's, or a random one of another type.
+            let value = match prop.ty {
+                Ty::Int => Lit::Int(self.rng.range(1, 30)),
+                ty => ty.random(&mut self.rng),
+            };
+            props.push((prop.name.to_string(), Expr::Lit(value)));
         }
         (EdgePat { var, label, dir, quant, props, filter }, next_label)
     }
@@ -1007,8 +1013,17 @@ impl<'a> Gen<'a> {
                 Expr::Lit(Lit::Str(self.rng.pick(&["Ada", "Bob", "v1", "City2", "r0", "", "a b"]).to_string()))
             }
             Ty::Bool => Expr::Lit(Lit::Bool(self.rng.chance(0.5))),
+            // Declined, a temporal value is a temporal property in scope, or NULL when the scope has none.
+            ty if !self.literal_allowed(ty) => (0..4).find_map(|_| self.property(ty)).or_else(|| self.value_var(ty)).unwrap_or(Expr::Lit(Lit::Null)),
             other => Expr::Lit(other.random(&mut self.rng)),
         }
+    }
+
+    /// Whether a literal of this type may be written here. A temporal literal is a feature like any other, so
+    /// isolation, weights, and `disable` govern it; engines without temporal literals would otherwise reject
+    /// most queries.
+    fn literal_allowed(&mut self, ty: Ty) -> bool {
+        !ty.temporal() || self.want("temporal_literal", 0.25)
     }
 
     fn int_expr(&mut self, depth: u32) -> Expr {
@@ -1230,7 +1245,7 @@ impl<'a> Gen<'a> {
     fn insert_node_pattern(&mut self, label: &'static str, named: bool) -> NodePat {
         let mut props = vec![("id".to_string(), Expr::Lit(Lit::Int(self.new_id())))];
         for prop in &self.schema.node(label).props {
-            if prop.required || self.rng.chance(0.5) {
+            if prop.required || self.rng.chance(0.5) || !self.literal_allowed(prop.ty) {
                 continue;
             }
             let value = match prop.ty {
@@ -1475,7 +1490,11 @@ impl<'a> Gen<'a> {
                     .iter()
                     .flat_map(|node| node.props.iter().filter(|prop| !prop.required).map(move |prop| (node.label, prop.name, prop.ty)))
                     .collect();
-                let (node_label, prop_name, prop_ty) = *self.rng.pick(&candidates);
+                let (mut node_label, mut prop_name, mut prop_ty) = *self.rng.pick(&candidates);
+                if !self.literal_allowed(prop_ty) {
+                    let plain: Vec<_> = candidates.iter().copied().filter(|(_, _, ty)| !ty.temporal()).collect();
+                    (node_label, prop_name, prop_ty) = *self.rng.pick(&plain);
+                }
                 let path = PathPat {
                     var: None,
                     search: None,

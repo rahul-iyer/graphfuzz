@@ -141,3 +141,26 @@ fn the_bundled_grammars_parse() {
     let cypher = crate::g4::Grammar::load(Path::new("grammars/opencypher/Cypher.g4")).unwrap();
     assert!(cypher.rules.contains_key("oC_Cypher"));
 }
+
+#[test]
+fn isolating_a_feature_leaves_temporal_literals_out() {
+    let schema = SchemaConfig::social().build(false).unwrap();
+    for (isolate, expect_literals) in [
+        ("multi_path", false),
+        ("optional_match", false),
+        ("insert_node", false),
+        ("insert_path", false),
+        ("multi_insert", false),
+        ("next_set", false),
+        ("temporal_literal", true),
+    ] {
+        let config = Config { exclude: BTreeSet::new(), undirected: false, isolate: Some(isolate.to_string()), weights: Weights::default() };
+        let mut generator = Gen::new(7, &schema, &config);
+        let with_literals = (0..200).filter(|_| crate::features::of(&generator.generate().query).contains("temporal_literal")).count();
+        if expect_literals {
+            assert!(with_literals > 0, "isolate:{isolate} should use temporal literals");
+        } else {
+            assert_eq!(with_literals, 0, "isolate:{isolate} produced temporal literals");
+        }
+    }
+}

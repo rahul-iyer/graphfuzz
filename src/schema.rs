@@ -50,6 +50,10 @@ impl Ty {
         }
     }
 
+    pub fn temporal(self) -> bool {
+        matches!(self, Ty::Date | Ty::LocalDateTime | Ty::ZonedDateTime)
+    }
+
     /// A random value of the type, as a literal.
     pub fn random(self, rng: &mut Rng) -> Lit {
         let date = |rng: &mut Rng| {
