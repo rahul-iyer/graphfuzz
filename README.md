@@ -1,171 +1,170 @@
 # graphfuzz
 
-A differential and metamorphic fuzzer for graph query engines that speak ISO GQL (ISO/IEC 39075) or Cypher.
+**A differential and metamorphic fuzzer for graph query engines that speak ISO GQL (ISO/IEC 39075) or Cypher.**
 
-graphfuzz generates typed graph queries from one AST, prints each in every engine's dialect (GQL, Cypher 25,
-openCypher), runs them on every configured engine, and reports where an engine disagrees with the reference
-engine (Neo4j by default) or with itself. Failing queries are reduced to minimal ones. It also reads the
-official ANTLR grammars and tries every choice they offer.
+graphfuzz builds random, well-typed graph queries from one AST. It prints each query in every engine's dialect
+(GQL, Cypher 25 or openCypher) and runs it on every configured engine. It then reports where an engine
+disagrees with the reference engine (Neo4j) or with itself. Each failing query is reduced to a minimal one
+that still fails the same way.
+
+It has already found wrong answers and crashes in Neo4j, [DuckGQL](https://github.com/rahul-iyer/duckdb-gql)
+and [Ladybug](https://github.com/LadybugDB/ladybug). See [Bugs found](#bugs-found).
+
+```
+             ┌──────────── random schema + fixture (from the seed)
+             ▼
+  typed AST ──► render ──► GQL ─────────► DuckGQL ─┐
+     │                 ├──► openCypher ──► Ladybug ─┼──► compare ──► reduce ──► report.md
+     │                 └──► Cypher 25 ──► Neo4j ───┘   (reference)
+     └──► metamorphic rewrites (TLP, count(*), DISTINCT, path reversal, A|A ≡ A)
+```
 
 ## Quickstart
 
-The default run tests [DuckGQL](https://github.com/rahul-iyer/duckdb-gql) against Neo4j. Build DuckGQL first, then
-point graphfuzz at it:
+By default, graphfuzz tests DuckGQL against Neo4j.
 
 ```sh
-docker compose up -d                 # Neo4j 2026.10 on localhost:7474
-cp .cargo/config.toml.example .cargo/config.toml   # then set DUCKDB_LIB_DIR and DUCKDB_INCLUDE_DIR
+docker compose up -d                                 # Neo4j 2026.10 on localhost:7474
+cp .cargo/config.toml.example .cargo/config.toml     # set DUCKDB_LIB_DIR and DUCKDB_INCLUDE_DIR to your DuckGQL build
 cargo build --release
-./target/release/graphfuzz repro --config config.yml --gql "MATCH (a)-[:KNOWS]->(b) RETURN count(*) AS c0"
-./target/release/graphfuzz run --config config.yml          # writes runs/latest/report.md
+./target/release/graphfuzz run --config config.yml   # writes runs/latest/report.md
 ```
 
-**Optional: Ladybug against Neo4j.** No DuckGQL build is needed. Set `enabled: true` on the `ladybug` engine in
-`config.yml`, then:
+**Ladybug against Neo4j (optional).** This needs no DuckGQL build. First set `enabled: true` on the `ladybug`
+engine in `config.yml`. Then run:
 
 ```sh
-cargo build --release --no-default-features --features ladybug   # Ladybug only; add duckgql for all three
+cargo build --release --no-default-features --features ladybug   # use --features ladybug to keep DuckGQL too
 ./target/release/graphfuzz run --config config.yml
 ```
 
-Without Docker Compose, start Neo4j with
-`docker run -d --name graphfuzz-neo4j -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/graphfuzz123 neo4j:2026.10-community`.
-Engines whose connector is not compiled in are skipped, with a note.
+**Without Docker Compose**, start Neo4j yourself:
+
+```sh
+docker run -d --name graphfuzz-neo4j -p 7474:7474 -p 7687:7687 \
+  -e NEO4J_AUTH=neo4j/graphfuzz123 neo4j:2026.10-community
+```
+
+**Check a single query** on every engine:
+
+```sh
+./target/release/graphfuzz repro --config config.yml --gql "MATCH (a)-[:KNOWS]->(b) RETURN count(*) AS c0"
+```
 
 ## Bugs found
 
-Wrong answers graphfuzz has found, each reproducible with `graphfuzz repro --seed 1` on the declared schema (the
-counts below; remove `random:` from the schema in `config.yml`), and in shape on any seed:
+To reproduce these counts, run `graphfuzz repro --seed 1` on the declared schema, after removing `random:` from
+`schema` in `config.yml`. The same failures appear on any seed, though with different counts.
 
 | engine | query | answer | expected |
 |---|---|---|---|
-| Neo4j 2026.10.2 | `MATCH (a)-[:LOCATED_IN\|LOCATED_IN]->(b) RETURN count(*)` | 16 | 8, as `-[:LOCATED_IN]->` (see also [neo4j#14041](https://github.com/neo4j/neo4j/issues/14041)) |
+| Neo4j 2026.10.2 | `MATCH (a)-[:LOCATED_IN\|LOCATED_IN]->(b) RETURN count(*)` | 16 | 8, as `-[:LOCATED_IN]->` (see [neo4j#14041](https://github.com/neo4j/neo4j/issues/14041)) |
 | DuckGQL | `MATCH (a)-[:KNOWS\|KNOWS]->(b) RETURN count(*)` | 40 | 20, as `-[:KNOWS]->` |
 | DuckGQL | `MATCH (a:Person)-[:KNOWS]->(a) RETURN count(*)` (`--seed 11`, random schema) | 30, every KNOWS edge | 2, the edges from a node to itself |
-| DuckGQL | `MATCH (n) ORDER BY n.id LIMIT 6 RETURN sum(n.id - n.population)` | 6 rows | 1 row (-74, as Neo4j): the aggregate is over the six rows |
+| DuckGQL | `MATCH (n) ORDER BY n.id LIMIT 6 RETURN sum(n.id - n.population)` | 6 rows | 1 row (-74, as Neo4j) |
 | Ladybug (`lbug` 0.22.3) | `RETURN count(DISTINCT NULL)` | assertion failure, `UNREACHABLE_CODE` in `types.cpp` | 0 |
 | Ladybug (`lbug` 0.22.3) | `MATCH (n:Company) RETURN count(NULL)` | "Trying to a create a vector with ANY type" | 0 |
 | Ladybug (`lbug` 0.22.3) | `MATCH (n:Person) WHERE CASE WHEN CASE WHEN n.age < 0 THEN FALSE ELSE 20 < n.age END THEN FALSE ELSE TRUE END RETURN count(*)` | 12 | 5: an outer `WHEN NULL` takes the ELSE branch |
-| Ladybug (`lbug` 0.22.3) | `MATCH (a:Person) OPTIONAL MATCH (b:Company) WHERE a.seen IS NULL RETURN count(*)` | 12 | 27: no optional match survives an `IS NULL` test on an outer variable |
+| Ladybug (`lbug` 0.22.3) | `MATCH (a:Person) OPTIONAL MATCH (b:Company) WHERE a.seen IS NULL RETURN count(*)` | 12 | 27 |
 | Ladybug (`lbug` 0.22.3) | `MATCH (n:Person) RETURN count(n.balance)` (a DECIMAL) | binder error: COUNT rejects DECIMAL(18, 3) | 10 |
 
 Ladybug answers both duplicated-type queries correctly (8 and 20).
 
-Not bugs, but differences the report names on their own (`match_mode`): Neo4j never uses one relationship
-twice in a MATCH (DIFFERENT RELATIONSHIPS), while DuckGQL and Ladybug may (REPEATABLE ELEMENTS, the GQL
-default), so `MATCH (a)-[]->(b), (a)-[]->(c)` has more rows on them.
+Some differences are not bugs, and the report names them on their own. One is `match_mode`. In a MATCH, Neo4j
+never uses one relationship twice (DIFFERENT RELATIONSHIPS). DuckGQL and Ladybug may (REPEATABLE ELEMENTS,
+the GQL default). So `MATCH (a)-[]->(b), (a)-[]->(c)` returns more rows on them. Before graphfuzz reports such
+a mismatch, it re-runs the query on Neo4j with `MATCH REPEATABLE ELEMENTS`.
 
-## Schema and types
+## How it works
 
-Each run draws its schema and data from the seed. `seed: random` picks a new seed every run; the log and the
-report print it, and `graphfuzz run --seed N` (also `repro` and `generate`) repeats that run exactly. With
-`schema.random`, the declared types below are extended with random node types, edge types (one always from a
-type to itself), and properties, and every type's node count and edge density is drawn; the report lists the
-schema it used. Filters compare properties with values the fixture holds, so most queries bind data: the
-report's *Data reached* section says how many bound nothing.
+- **One typed AST, many dialects.** The generator tracks the type of every variable and expression, so each
+  query reads, compares, inserts and sets values of the right type. Profiles in `profiles/` say how each
+  dialect spells a feature, such as quantifiers, string concatenation, LET/FILTER/NEXT as WITH, or function
+  names. They also list the features a dialect lacks.
+- **Queries that reach data.** Filters compare properties with values the fixture actually holds, so most
+  queries bind rows instead of returning empty. The report's *Data reached* section says how many bound
+  nothing.
+- **A random schema per seed.** With `schema.random`, the declared node and edge types are extended with random
+  types and properties, including self-loop edge types. Each type's node count and edge density is drawn too.
+  `seed: random` picks a new seed every run. `--seed N` on `run`, `repro` or `generate` repeats a run exactly.
+- **Oracles:**
+  - **Differential:** each engine under test against the reference, each on its own share of queries.
+  - **Metamorphic:** rewrites that must not change an answer: partitioning a filter three ways (TLP),
+    `count(*)`, `DISTINCT`, path reversal, and `:A|A ≡ :A`. They also cover queries the reference cannot
+    express.
+- **Reduction.** A greedy AST reducer shrinks each failure. It keeps a reduction only if the mismatch has the
+  same shape: the same side is empty, and the two row counts compare the same way. This keeps a reduction from
+  sliding onto a different bug.
+- **Normalized results.** Numbers are rounded to seven digits, dates printed as `YYYY-MM-DD`, and datetimes as
+  UTC `YYYY-MM-DDTHH:MM:SS`. Nodes, relationships and paths are compared by their labels and properties.
+- **Isolation.** Embedded engines run in crash-isolated workers, so a segfault is a finding and doesn't stop the
+  run. Data changes are rolled back.
 
-The `schema:` section of `config.yml` declares the graph: node and edge types with typed properties (INT64,
-FLOAT64, STRING, BOOL, DATE, LOCAL DATETIME, ZONED DATETIME, DECIMAL). It becomes each engine's schema
-(DuckGQL's typed graph, Ladybug's tables; Neo4j needs none) and the fixture, whose values are written in each
-engine's dialect: a profile's `literals` say how (`DATE '…'` in GQL, `date('…')` in Cypher, overridable per
-engine). The generator tracks the type of every variable and expression, so it reads properties of the type it
-needs, compares values of one type, and inserts and sets values of each property's type. Results are
-normalized across engines: numbers to seven digits, dates to `YYYY-MM-DD`, datetimes to UTC
-`YYYY-MM-DDTHH:MM:SS`, and nodes, relationships, and paths to their labels and properties.
+## Grammar coverage
 
-DuckGQL has no temporal literals, so its connector writes temporal fixture values with SQL into its graph
-tables; queries that write temporal literals stay GQL and show the gap.
+`grammars/` holds the official ANTLR grammars:
+
+- OpenGQL's `GQL.g4` for ISO/IEC 39075;
+- openCypher 9's `Cypher.g4` (M23).
+
+graphfuzz reads these grammars itself and tries every choice they offer:
+
+- each alternative of each rule;
+- each optional element, both present and absent;
+- each repetition 0, 1 and 2 times;
+- with `coverage: pairs`, each pair of alternatives.
+
+Each choice gets the shortest well-typed sentence that makes it. graphfuzz also runs the same sentence without
+that choice, as a baseline. A failure counts against the choice only when the baseline doesn't fail the same
+way.
+
+```sh
+./target/release/graphfuzz sentences --config config.yml --grammar gql --count 30
+./target/release/graphfuzz grammar --config config.yml    # writes grammar.md and grammar.jsonl
+```
 
 ## Engines
 
-An engine in `config.yml` is a **connector** (how to reach it) and a **dialect** (how to write queries for it).
+Each engine in `config.yml` is a **connector**, which says how to reach it, plus a **dialect**, which says how
+to write queries for it.
 
-Connectors:
-
-| connector | engine | data modification |
+| connector | engine | data changes |
 |---|---|---|
-| `duckgql` | DuckGQL through the linked libduckdb, in a crash-isolated worker | rolled back |
-| `ladybug` | Ladybug through the `lbug` crate, in a crash-isolated worker | rolled back |
+| `duckgql` | DuckGQL, through the linked libduckdb (cargo feature, on by default) | rolled back |
+| `ladybug` | Ladybug, through the `lbug` crate (cargo feature `ladybug`) | rolled back |
 | `neo4j_http` | Neo4j's HTTP Query API | rolled back |
-| `opencypher_http` | form-encoded openCypher over HTTP, as Amazon Neptune's `/openCypher` | skipped |
+| `opencypher_http` | form-encoded openCypher over HTTP, like Amazon Neptune's `/openCypher` | skipped |
 
-Dialects are profiles in `profiles/`: `gql`, `cypher25`, and `opencypher`. A profile lists the features its
-language lacks (by the names `graphfuzz features` prints) and how it spells the rest: quantifiers, string
-concatenation, LET/FILTER/NEXT as WITH, function names, and so on. An engine adjusts its profile with
-`supported`, `unsupported`, and `syntax`, so a new openCypher endpoint is a config entry, and a new dialect is
-a profile file. A new protocol is one `Engine` implementation in `src/engine.rs`.
+To add an openCypher endpoint, add a config entry. A new dialect is a new profile file, and a new protocol is
+one `Engine` implementation in `src/engine.rs`. Engines whose connector isn't compiled in are skipped, with a
+note. If `password` is left out of `config.yml`, it's read from `NEO4J_PASSWORD`.
 
-Each case is run on the reference and on every engine whose dialect can express it; queries the reference
-cannot express are checked with rewrites that must not change an answer (partitioning a filter, reversing
-paths, `count(*)`, `DISTINCT`) on engines with `metamorphic: true`.
-
-## Grammars
-
-`grammars/` holds the official grammars: OpenGQL's `GQL.g4` for ISO/IEC 39075 (as DuckGQL vendors it) and
-openCypher 9's `Cypher.g4` (milestone M23, from artifacts.opencypher.org). graphfuzz reads ANTLR 4 grammars
-itself and tries every choice they offer: each alternative of each rule, each optional element present and
-absent, each repetition 0, 1, and 2 times, and (`coverage: pairs`) each alternative of every rule an
-alternative uses. Each choice gets the shortest sentence that makes it; a failure counts against the choice
-only when the sentence without it (its baseline) does not fail the same way. Sentences run in rolled-back
-transactions, the fixture is checked for drift, and engines that answer the same sentence are compared.
-
-A grammar in `config.yml` names its file, start rule, engines, a vocabulary (fixture names, numbers, and
-strings in place of derived identifiers and literals), and `prefer`, the alternatives to take when no choice
-is forced, so sentences start from `MATCH ... RETURN` rather than the shortest statement.
-
-A grammar's `typing` makes its sentences well typed. `value_rules` are rules that stand for one value; where a
-sentence tries no choice inside one, it gets a value of the type its context wants instead of the rule's
-shortest derivation. `types` give that type below a rule or an alternative (`SAME` for one type shared by
-comparison operands), `values` list values of each type (fixture properties and literals, in turn), and
-`present` includes optional elements by default, so sentences start from `MATCH (n:Person)`.
-`graphfuzz sentences --grammar G --rule R` lists a rule's alternatives and elements as these keys number them.
+## Commands
 
 ```sh
-./target/release/graphfuzz sentences --config config.yml --grammar gql --count 30   # targets and sentences
-./target/release/graphfuzz grammar --config config.yml                              # grammar.md, grammar.jsonl
+graphfuzz run      --config config.yml [--seed N]                    # fuzz; writes report.md and results.jsonl
+graphfuzz repro    --config config.yml --gql "..." [--seed N]        # one query on every engine
+graphfuzz generate --config config.yml --dialect opencypher --count 20 --tags
+graphfuzz features                                                   # feature and group names for config.yml
 ```
 
-## Setup
-
-The embedded engines are cargo features:
-
-| feature | default | needs |
-|---|---|---|
-| `duckgql` | on | a build of [DuckGQL](https://github.com/rahul-iyer/duckdb-gql): copy `.cargo/config.toml.example` to `.cargo/config.toml` and point `DUCKDB_LIB_DIR` and `DUCKDB_INCLUDE_DIR` at it |
-| `ladybug` | off | nothing; the `lbug` crate builds Ladybug. `--features ladybug`, and `enabled: true` on its engine in `config.yml` |
-
-The HTTP connectors (Neo4j, openCypher endpoints) are always built. `docker compose up -d` starts Neo4j with
-the password `config.yml` uses; leave `password` out of `config.yml` to read it from `NEO4J_PASSWORD`.
-
-## Use
-
-```sh
-cargo build --release
-./target/release/graphfuzz run --config config.yml          # writes report.md and results.jsonl
-./target/release/graphfuzz generate --config config.yml --dialect opencypher --count 20 --tags
-./target/release/graphfuzz repro --config config.yml --gql "MATCH (n:Person) RETURN count(*) AS c"
-./target/release/graphfuzz features                         # feature and group names for config.yml
-```
-
-`config.yml` documents every setting: seed, engines, phases, per-feature and per-group weights, `focus`,
-`disable`, and the checks.
+`config.yml` documents every setting: the seed, schema, engines and phases, the weights per feature and per
+group, `focus`, `disable`, and the checks.
 
 ## Development
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test --no-default-features   # no engine needed
+cargo test --no-default-features      # needs no engine
 ```
 
-CI cannot build DuckGQL, so it runs these without the embedded engines and with Ladybug, then a short run of
-Ladybug against Neo4j.
+CI can't build DuckGQL. Instead, it runs the checks above without the embedded engines and with Ladybug. Then
+it runs a short fuzzing session of Ladybug against Neo4j. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your
-option. The bundled grammars are Apache-2.0; see [NOTICE](NOTICE). Unless you state otherwise, any
-contribution you submit for inclusion is dual licensed as above, without additional terms.
+graphfuzz is licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT license](LICENSE-MIT), at your option. The bundled grammars are Apache-2.0; see [NOTICE](NOTICE).
 
-Cypher and Neo4j are trademarks of Neo4j, Inc.; graphfuzz is not affiliated with Neo4j or the openCypher
-project.
+Cypher and Neo4j are trademarks of Neo4j, Inc. graphfuzz isn't affiliated with Neo4j or the openCypher project.
