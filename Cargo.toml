@@ -11,10 +11,10 @@ categories = ["development-tools::testing", "database"]
 publish = false
 
 [features]
-default = ["ladybug"]
+default = ["duckgql"]
 # DuckGQL through a libduckdb that links the duckgql extension; see .cargo/config.toml.example.
 duckgql = ["dep:duckdb"]
-# Ladybug, embedded through the lbug crate.
+# Ladybug, embedded through the lbug crate; optional, for Ladybug against Neo4j.
 ladybug = ["dep:lbug"]
 
 [dependencies]

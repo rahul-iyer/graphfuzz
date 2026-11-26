@@ -7,6 +7,6 @@ Issues and pull requests are welcome.
   Report the bug to the engine too; graphfuzz's README lists the ones found so far.
 - **A new engine:** an endpoint that speaks an existing dialect is a `config.yml` entry. A new protocol is
   one `Engine` implementation in `src/engine.rs`; a new dialect is a profile in `profiles/`.
-- **Before a pull request:** `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
+- **Before a pull request:** `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, and `cargo test --no-default-features` (add `--features ladybug` to test that connector).
 
 Contributions are dual licensed under MIT OR Apache-2.0, as the project is.

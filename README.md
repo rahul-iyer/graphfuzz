@@ -9,13 +9,23 @@ official ANTLR grammars and tries every choice they offer.
 
 ## Quickstart
 
-Ladybug against Neo4j, with nothing to build but graphfuzz:
+The default run tests [DuckGQL](https://github.com/rahul-iyer/duckdb-gql) against Neo4j. Build DuckGQL first, then
+point graphfuzz at it:
 
 ```sh
 docker compose up -d                 # Neo4j 2026.10 on localhost:7474
-cargo build --release                # with the Ladybug connector; DuckGQL is opt-in, see below
+cp .cargo/config.toml.example .cargo/config.toml   # then set DUCKDB_LIB_DIR and DUCKDB_INCLUDE_DIR
+cargo build --release
 ./target/release/graphfuzz repro --config config.yml --gql "MATCH (a)-[:KNOWS]->(b) RETURN count(*) AS c0"
 ./target/release/graphfuzz run --config config.yml          # writes runs/latest/report.md
+```
+
+**Optional: Ladybug against Neo4j.** No DuckGQL build is needed. Set `enabled: true` on the `ladybug` engine in
+`config.yml`, then:
+
+```sh
+cargo build --release --no-default-features --features ladybug   # Ladybug only; add duckgql for all three
+./target/release/graphfuzz run --config config.yml
 ```
 
 Without Docker Compose, start Neo4j with
@@ -121,8 +131,8 @@ The embedded engines are cargo features:
 
 | feature | default | needs |
 |---|---|---|
-| `ladybug` | on | nothing; the `lbug` crate builds Ladybug |
-| `duckgql` | off | a build of [DuckGQL](https://github.com/rahul-iyer/duckdb-gql): copy `.cargo/config.toml.example` to `.cargo/config.toml` and point `DUCKDB_LIB_DIR` and `DUCKDB_INCLUDE_DIR` at it, then `cargo build --release --features duckgql` |
+| `duckgql` | on | a build of [DuckGQL](https://github.com/rahul-iyer/duckdb-gql): copy `.cargo/config.toml.example` to `.cargo/config.toml` and point `DUCKDB_LIB_DIR` and `DUCKDB_INCLUDE_DIR` at it |
+| `ladybug` | off | nothing; the `lbug` crate builds Ladybug. `--features ladybug`, and `enabled: true` on its engine in `config.yml` |
 
 The HTTP connectors (Neo4j, openCypher endpoints) are always built. `docker compose up -d` starts Neo4j with
 the password `config.yml` uses; leave `password` out of `config.yml` to read it from `NEO4J_PASSWORD`.
@@ -145,10 +155,11 @@ cargo build --release
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                      # no engine needed
+cargo test --no-default-features   # no engine needed
 ```
 
-CI runs these without the embedded engines, with Ladybug, and a short run of Ladybug against Neo4j.
+CI cannot build DuckGQL, so it runs these without the embedded engines and with Ladybug, then a short run of
+Ladybug against Neo4j.
 
 ## License
 

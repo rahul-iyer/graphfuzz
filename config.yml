@@ -65,8 +65,10 @@ engines:
     # Also check answers against rewrites that must not change them.
     metamorphic: true
 
+  # Optional: Ladybug against Neo4j. Build with --features ladybug and set enabled: true.
   ladybug:
     connector: ladybug          # embedded, through the lbug crate
+    enabled: false
     dialect: opencypher
     path: runs/ladybug.lbdb     # recreated at the start of every run
     supported: [label_or, exists_match]
