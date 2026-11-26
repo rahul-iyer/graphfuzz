@@ -33,6 +33,9 @@ Wrong answers graphfuzz has found, each reproducible with `graphfuzz repro` on t
 | DuckGQL | `MATCH (n) ORDER BY n.id LIMIT 6 RETURN sum(n.id - n.population)` | 6 rows | 1 row (-74, as Neo4j): the aggregate is over the six rows |
 | Ladybug (`lbug` 0.22.3) | `RETURN count(DISTINCT NULL)` | assertion failure, `UNREACHABLE_CODE` in `types.cpp` | 0 |
 | Ladybug (`lbug` 0.22.3) | `MATCH (n:Company) RETURN count(NULL)` | "Trying to a create a vector with ANY type" | 0 |
+| Ladybug (`lbug` 0.22.3) | `MATCH (n:Person) WHERE CASE WHEN CASE WHEN n.age < 0 THEN FALSE ELSE 20 < n.age END THEN FALSE ELSE TRUE END RETURN count(*)` | 12 | 5: an outer `WHEN NULL` takes the ELSE branch |
+| Ladybug (`lbug` 0.22.3) | `MATCH (a:Person) OPTIONAL MATCH (b:Company) WHERE a.seen IS NULL RETURN count(*)` | 12 | 27: no optional match survives an `IS NULL` test on an outer variable |
+| Ladybug (`lbug` 0.22.3) | `MATCH (n:Person) RETURN count(n.balance)` (a DECIMAL) | binder error: COUNT rejects DECIMAL(18, 3) | 10 |
 
 Ladybug answers both duplicated-type queries correctly (8 and 20).
 

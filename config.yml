@@ -60,6 +60,10 @@ engines:
     dialect: opencypher
     path: runs/ladybug.lbdb     # recreated at the start of every run
     supported: [label_or, exists_match]
+    # Ladybug has no REMOVE and no EXP, LN or LOG10. Its * and + walk paths that may repeat edges, up to an
+    # implementation-defined depth, where Neo4j's never repeat a relationship, so unbounded quantifiers are
+    # not comparable; bounded ones are, and differences there are named as match_mode.
+    unsupported: [remove_prop, log_fn, quant_star, quant_plus]
     syntax:
       # Ladybug has no localdatetime() or datetime(); it has TIMESTAMP and TIMESTAMP_TZ.
       literals: {local_datetime: "timestamp('{}')", zoned_datetime: "CAST('{}' AS TIMESTAMP_TZ)"}

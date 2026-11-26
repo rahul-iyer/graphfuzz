@@ -296,13 +296,31 @@ fn run(config_path: &Path) -> Result<()> {
             reference: if undirected_feature { None } else { reference },
         });
     }
-    phases.push(Phase {
-        name: "compare".to_string(),
-        config: Config { exclude: reference_unsupported.clone(), undirected: false, isolate: None, weights: weights.clone() },
-        count: file.phases.compare,
-        targets: targets.clone(),
-        reference,
-    });
+    // The compare budget is split among the engines under test. Each share is generated for what both the
+    // reference and that engine can express, so an engine whose dialect lacks much of the other's is not
+    // left with the few queries it can run, and runs on every engine that can express it.
+    let shares = targets.len().max(1);
+    for share in 0..shares {
+        let mut exclude = reference_unsupported.clone();
+        let name = match targets.get(share) {
+            Some(&target) if targets.len() > 1 => {
+                exclude.extend(features_named(&slots[target].profile.unsupported));
+                format!("compare:{}", slots[target].name)
+            }
+            Some(&target) => {
+                exclude.extend(features_named(&slots[target].profile.unsupported));
+                "compare".to_string()
+            }
+            None => "compare".to_string(),
+        };
+        phases.push(Phase {
+            name,
+            config: Config { exclude, undirected: false, isolate: None, weights: weights.clone() },
+            count: file.phases.compare / shares + usize::from(share < file.phases.compare % shares),
+            targets: targets.clone(),
+            reference,
+        });
+    }
     phases.push(Phase {
         name: "explore".to_string(),
         config: Config { exclude: BTreeSet::new(), undirected: true, isolate: None, weights: weights.clone() },
