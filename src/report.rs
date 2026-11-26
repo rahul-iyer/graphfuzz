@@ -91,7 +91,7 @@ pub fn markdown(cases: &[CaseResult], header: &str, engines: &[String], referenc
     }
     let _ = writeln!(
         out,
-        "\n`agree`: same rows as the reference. `rejects`: an error where the reference answered. `unchecked_*`: the reference cannot express the case. `unsupported`: the engine's dialect cannot."
+        "\n`agree`: same rows as the reference. `rejects`: an error where the reference answered. `unchecked_*`: the reference cannot express the case. `unsupported`: the engine's dialect cannot. `match_mode`: differs from the reference only in whether one MATCH may reuse an edge."
     );
 
     for engine in engines {
@@ -148,11 +148,28 @@ fn engine_section(out: &mut String, cases: &[CaseResult], engine: &str, referenc
         let case = representative(group, engine);
         let _ = writeln!(out, "### {} case(s): {}\n", group.len(), features);
         example(out, case, engine, reference);
-        if let Some(Verdict::Mismatch { target, reference: expected }) = verdict(case, engine) {
-            let _ = writeln!(out, "{engine} rows:");
+        if let Some(Verdict::Mismatch { target, reference: expected, target_rows, reference_rows }) = verdict(case, engine) {
+            let _ = writeln!(out, "{engine} rows ({target_rows}):");
             out.push_str(&code(&target.join("\n")));
-            let _ = writeln!(out, "{} rows:", reference.unwrap_or("reference"));
+            let _ = writeln!(out, "{} rows ({reference_rows}):", reference.unwrap_or("reference"));
             out.push_str(&code(&expected.join("\n")));
+        }
+    }
+
+    let match_mode: Vec<&CaseResult> = cases.iter().filter(|case| matches!(verdict(case, engine), Some(Verdict::MatchMode { .. }))).collect();
+    if !match_mode.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n## {engine}: match mode differs from {} ({})\n\nThese answers differ from {0}'s only because {engine} lets one MATCH use an edge more than once: \
+             {0} returns {engine}'s rows when the MATCH says REPEATABLE ELEMENTS. Over-represented: {}\n",
+            reference.unwrap_or("the reference"),
+            match_mode.len(),
+            overrepresented(&match_mode, cases)
+        );
+        let case = representative(&match_mode, engine);
+        example(out, case, engine, reference);
+        if let Some(Verdict::MatchMode { target_rows, reference_rows }) = verdict(case, engine) {
+            let _ = writeln!(out, "{engine}: {target_rows} rows; {}: {reference_rows} rows.", reference.unwrap_or("reference"));
         }
     }
 

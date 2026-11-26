@@ -365,6 +365,7 @@ fn failure_group(result: &CaseResult, verdict: &Verdict) -> Option<String> {
         Verdict::TargetRejects { message, .. } | Verdict::TargetOnlyError { message, .. } => format!("error:{}", signature(message)),
         Verdict::Metamorphic { oracle, .. } => format!("oracle:{oracle}:{}", tags()),
         Verdict::Mismatch { .. } => format!("mismatch:{}", tags()),
+        Verdict::MatchMode { .. } => "match_mode".to_string(),
         Verdict::Crash(_) => "crash".to_string(),
         Verdict::Timeout => "timeout".to_string(),
         _ => return None,

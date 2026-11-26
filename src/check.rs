@@ -30,7 +30,11 @@ pub enum Verdict {
     Agree,
     BothReject { target: String, reference: String },
     /// The rows differ: a correctness bug in one of the engines.
-    Mismatch { target: Vec<String>, reference: Vec<String> },
+    /// The first 20 rows of each side, and how many each returned.
+    Mismatch { target: Vec<String>, reference: Vec<String>, target_rows: usize, reference_rows: usize },
+    /// The rows differ only by match mode: the reference returns the engine's rows once every MATCH may
+    /// repeat edges (REPEATABLE ELEMENTS). One known difference, kept apart from wrong answers.
+    MatchMode { target_rows: usize, reference_rows: usize },
     /// The engine rejected what the reference ran.
     TargetRejects { kind: ErrorKind, message: String },
     /// The reference rejected what the engine ran.
@@ -54,6 +58,7 @@ impl Verdict {
             Verdict::Agree => "agree",
             Verdict::BothReject { .. } => "both_reject",
             Verdict::Mismatch { .. } => "mismatch",
+            Verdict::MatchMode { .. } => "match_mode",
             Verdict::TargetRejects { kind: ErrorKind::Internal, .. } | Verdict::TargetOnlyError { kind: ErrorKind::Internal, .. } => "internal_error",
             Verdict::TargetRejects { .. } => "rejects",
             Verdict::ReferenceRejects { .. } => "reference_rejects",
@@ -148,9 +153,109 @@ pub fn same_failure(left: &Verdict, right: &Verdict) -> bool {
         (Verdict::TargetRejects { message: a, .. }, Verdict::TargetRejects { message: b, .. })
         | (Verdict::TargetOnlyError { message: a, .. }, Verdict::TargetOnlyError { message: b, .. }) => signature(a) == signature(b),
         (Verdict::Metamorphic { oracle: a, .. }, Verdict::Metamorphic { oracle: b, .. }) => a == b,
-        (Verdict::Mismatch { .. }, Verdict::Mismatch { .. }) | (Verdict::Timeout, Verdict::Timeout) | (Verdict::Crash(_), Verdict::Crash(_)) => true,
+        // A smaller query must differ the same way, or reduction swaps a subtle bug for a louder one.
+        (Verdict::Mismatch { target_rows: a, reference_rows: b, .. }, Verdict::Mismatch { target_rows: c, reference_rows: d, .. }) => {
+            mismatch_shape(*a, *b) == mismatch_shape(*c, *d)
+        }
+        (Verdict::MatchMode { .. }, Verdict::MatchMode { .. }) | (Verdict::Timeout, Verdict::Timeout) | (Verdict::Crash(_), Verdict::Crash(_)) => true,
         _ => false,
     }
+}
+
+/// Which side returned no rows, and which returned more.
+fn mismatch_shape(target: usize, reference: usize) -> (bool, bool, std::cmp::Ordering) {
+    (target == 0, reference == 0, target.cmp(&reference))
+}
+
+/// The query with every MATCH that names no match mode set to REPEATABLE ELEMENTS; None if none changes.
+fn repeatable(original: &Query) -> Option<Query> {
+    fn linear(linear: &mut Linear) -> bool {
+        let mut changed = false;
+        for clause in &mut linear.clauses {
+            match clause {
+                // Only a pattern of two edges or more, or a quantified one, can use an edge twice.
+                Clause::Match { mode: mode @ None, paths, .. }
+                    if paths.iter().map(|path| path.hops.len()).sum::<usize>() > 1 || paths.iter().any(|path| path.hops.iter().any(|(edge, _)| edge.quant.is_some())) =>
+                {
+                    *mode = Some(MatchMode::RepeatableElements);
+                    changed = true;
+                }
+                Clause::Call { body, .. } => changed |= query(body),
+                _ => {}
+            }
+        }
+        changed
+    }
+    fn query(whole: &mut Query) -> bool {
+        match whole {
+            Query::Linear(part) => linear(part),
+            Query::Composite(left, _, right) => query(left) | query(right),
+            Query::Next(parts) => parts.iter_mut().fold(false, |changed, part| linear(part) | changed),
+        }
+    }
+    let mut variant = original.clone();
+    query(&mut variant).then_some(variant)
+}
+
+/// Each label expression with `A|A` and `A&A` written `A`; None if the query has none.
+fn idempotent_labels(original: &Query) -> Option<Query> {
+    fn same(left: &LabelExpr, right: &LabelExpr) -> bool {
+        match (left, right) {
+            (LabelExpr::Name(a), LabelExpr::Name(b)) => a == b,
+            (LabelExpr::Wildcard, LabelExpr::Wildcard) => true,
+            (LabelExpr::Not(a), LabelExpr::Not(b)) => same(a, b),
+            (LabelExpr::And(a, b), LabelExpr::And(c, d)) | (LabelExpr::Or(a, b), LabelExpr::Or(c, d)) => same(a, c) && same(b, d),
+            _ => false,
+        }
+    }
+    fn label(expr: &mut LabelExpr) -> bool {
+        match expr {
+            LabelExpr::And(left, right) | LabelExpr::Or(left, right) => {
+                if same(left, right) {
+                    let mut kept = (**left).clone();
+                    label(&mut kept);
+                    *expr = kept;
+                    true
+                } else {
+                    label(left) | label(right)
+                }
+            }
+            LabelExpr::Not(inner) => label(inner),
+            _ => false,
+        }
+    }
+    fn path(path: &mut PathPat) -> bool {
+        let mut changed = path.start.label.as_mut().is_some_and(label);
+        for (edge, node) in &mut path.hops {
+            changed |= edge.label.as_mut().is_some_and(label);
+            changed |= node.label.as_mut().is_some_and(label);
+        }
+        changed
+    }
+    fn linear(linear: &mut Linear) -> bool {
+        let mut changed = false;
+        for clause in &mut linear.clauses {
+            match clause {
+                Clause::Match { paths, .. } => {
+                    for each in paths.iter_mut() {
+                        changed |= path(each);
+                    }
+                }
+                Clause::Call { body, .. } => changed |= query(body),
+                _ => {}
+            }
+        }
+        changed
+    }
+    fn query(whole: &mut Query) -> bool {
+        match whole {
+            Query::Linear(part) => linear(part),
+            Query::Composite(left, _, right) => query(left) | query(right),
+            Query::Next(parts) => parts.iter_mut().fold(false, |changed, part| linear(part) | changed),
+        }
+    }
+    let mut variant = original.clone();
+    query(&mut variant).then_some(variant)
 }
 
 /// The queries that read back the whole graph after a data modification; plain Cypher and GQL alike.
@@ -292,6 +397,31 @@ impl Slot {
             }
         }
 
+        // A|A and A&A match what A matches. Counted below the RETURN, so a filter or aggregate cannot hide
+        // rows matched twice.
+        if let Some(Query::Linear(simpler)) = idempotent_labels(&generated.query) {
+            let counted = |clauses: &[Clause]| {
+                Query::Linear(Linear {
+                    clauses: clauses.to_vec(),
+                    tail: Tail::Return(Return {
+                        distinct: false,
+                        items: ReturnItems::Items(vec![(Expr::Agg { name: "count".to_string(), distinct: false, arg: None }, Some("c0".to_string()))]),
+                        group_by: vec![],
+                        order: vec![],
+                        offset: None,
+                        limit: None,
+                    }),
+                })
+            };
+            let (original, variant) = (counted(&linear.clauses), counted(&simpler.clauses));
+            if let (Some(before), Some(after)) = (self.rows(&original), self.rows(&variant)) {
+                if before != after {
+                    let count = |rows: &[Row]| rows.first().and_then(|row| row.first()).map(Val::key).unwrap_or_default();
+                    return Some(failure("idempotent_label", &variant, format!("count(*) = {} with A|A or A&A, {} with A", count(&before), count(&after))));
+                }
+            }
+        }
+
         // A path read from its other end binds the same elements.
         let reversible = linear.clauses.iter().all(|clause| match clause {
             Clause::Match { paths, .. } => paths.iter().all(|path| path.var.is_none() && path.search.is_none()),
@@ -410,7 +540,18 @@ impl<'a> Checker<'a> {
                                 (multiset(left), multiset(right))
                             };
                             if left != right {
-                                return Ok(Verdict::Mismatch { target: left.into_iter().take(20).collect(), reference: right.into_iter().take(20).collect() });
+                                let (target_rows, reference_rows) = (left.len(), right.len());
+                                // Neo4j never repeats a relationship within one MATCH; engines that do differ
+                                // from it wherever a pattern can reuse an edge. Name that difference once.
+                                if let (false, Some(reference), Some(variant)) = (generated.mutation, self.reference, repeatable(&generated.query)) {
+                                    if let Some(rows) = self.slots[reference].rows(&variant) {
+                                        let again = if ordered(&generated.query) { sequence(&rows) } else { multiset(&rows) };
+                                        if again == left {
+                                            return Ok(Verdict::MatchMode { target_rows, reference_rows });
+                                        }
+                                    }
+                                }
+                                return Ok(Verdict::Mismatch { target: left.into_iter().take(20).collect(), reference: right.into_iter().take(20).collect(), target_rows, reference_rows });
                             }
                         }
                         (Outcome::Error(message), _) => {
