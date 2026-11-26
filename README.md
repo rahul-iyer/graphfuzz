@@ -18,6 +18,8 @@ cargo build --release                # with the Ladybug connector; DuckGQL is op
 ./target/release/graphfuzz run --config config.yml          # writes runs/latest/report.md
 ```
 
+Without Docker Compose, start Neo4j with
+`docker run -d --name graphfuzz-neo4j -p 7474:7474 -p 7687:7687 -e NEO4J_AUTH=neo4j/graphfuzz123 neo4j:2026.10-community`.
 Engines whose connector is not compiled in are skipped, with a note.
 
 ## Bugs found
