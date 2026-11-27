@@ -7,10 +7,11 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::ast::*;
-use crate::engine::{Engine, Outcome};
+use crate::engine::{Engine, Outcome, Variant};
 use crate::generate::{Generated, contains_aggregate};
 use crate::profile::Profile;
 use crate::render;
+use crate::rewrite::{self, Compare};
 use crate::schema::Schema;
 use crate::value::{Row, Val, multiset, sequence};
 
@@ -69,6 +70,8 @@ pub enum Verdict {
     },
     Crash(String),
     Timeout,
+    /// The reference passed its own checks; it has no other engine to agree with.
+    SelfChecked,
     /// Not checked, and why.
     Skipped(String),
     /// The engine's dialect lacks these features of the case.
@@ -90,6 +93,7 @@ impl Verdict {
             Verdict::Metamorphic { .. } => "metamorphic",
             Verdict::Crash(_) => "crash",
             Verdict::Timeout => "timeout",
+            Verdict::SelfChecked => "self_checked",
             Verdict::Skipped(_) => "skipped",
             Verdict::Unsupported(_) => "unsupported",
         }
@@ -338,6 +342,18 @@ pub struct Slot {
     pub metamorphic: bool,
     /// Whether it holds the graph with an undirected edge type, for GQL-only exploration.
     pub undirected_graph: bool,
+    /// Planner and runtime settings every query is also run under, by name.
+    pub variants: Vec<(String, Variant)>,
+    /// Whether a MATCH that names no match mode keeps its edges distinct, as Cypher does.
+    pub different_edges: bool,
+}
+
+/// The query text with a variant's options after the dialect's prefix: `CYPHER 25 planner=dp MATCH ...`.
+pub fn with_options(text: &str, prefix: &str, options: &str) -> String {
+    match text.strip_prefix(prefix) {
+        Some(rest) if !options.is_empty() => format!("{prefix}{options} {rest}"),
+        _ => text.to_string(),
+    }
 }
 
 /// Whether the result's order is meaningful: ordered by every returned column, so ties are identical rows.
@@ -373,15 +389,56 @@ impl Slot {
         }
     }
 
+    /// The single number a query returns, as count(*) does.
+    fn count(&mut self, query: &Query) -> Option<f64> {
+        match self.rows(query)?.first().and_then(|row| row.first()) {
+            Some(Val::Num(count)) => Some(*count),
+            _ => None,
+        }
+    }
+
     /// Rewrites of a query that must return the same rows; the first that does not is the failure.
-    fn metamorphic(&mut self, generated: &Generated, rows: &[Row]) -> Option<Verdict> {
+    fn metamorphic(&mut self, generated: &Generated, rows: &[Row], schema: &Schema) -> Option<Verdict> {
         if !self.metamorphic || generated.mutation {
             return None;
         }
-        let Query::Linear(linear) = &generated.query else { return None };
         let rows = rows.to_vec();
         let failure =
             |oracle: &str, variant: &Query, detail: String| Verdict::Metamorphic { oracle: oracle.to_string(), variant: render::gql(variant), detail };
+        let is_ordered = ordered(&generated.query);
+        let same = |left: &[Row], right: &[Row]| if is_ordered { sequence(left) == sequence(right) } else { multiset(left) == multiset(right) };
+
+        // Ground truth: the bindings counted from the fixture itself, under this engine's match mode.
+        if let (Query::Linear(linear), Some(graph)) = (&generated.query, &schema.graph)
+            && !linear.clauses.is_empty()
+            && let Some(expected) = graph.count(&linear.clauses, self.different_edges)
+        {
+            let variant = counted(&linear.clauses);
+            if let Some(actual) = self.count(&variant)
+                && actual != expected as f64
+            {
+                return Some(failure("ground_truth", &variant, format!("count(*) = {actual}, where the fixture has {expected} bindings")));
+            }
+        }
+
+        // The same query under other planner and runtime settings.
+        let text = render::render(&generated.query, &self.profile);
+        for (name, variant) in self.variants.clone() {
+            let changed = with_options(&text, &self.profile.prefix, &variant.options);
+            if let Ok(Outcome::Rows { rows: other, .. }) = self.engine.read_with(&variant.before, &changed, &variant.after)
+                && !same(&other, &rows)
+            {
+                let mut shown = variant.before.clone();
+                shown.push(changed);
+                return Some(Verdict::Metamorphic {
+                    oracle: format!("plan:{name}"),
+                    variant: shown.join(";\n"),
+                    detail: format!("{} rows by default, {} with {name}", rows.len(), other.len()),
+                });
+            }
+        }
+
+        let Query::Linear(linear) = &generated.query else { return None };
 
         // Ternary logic partitioning: p, NOT p, and p IS UNKNOWN split the rows.
         if let Some(predicate) = &generated.partition {
@@ -485,6 +542,42 @@ impl Slot {
                 }
             }
         }
+
+        // Equivalent patterns, and NoREC's unoptimizable count.
+        let mut whole: Option<Option<f64>> = None;
+        for rewritten in rewrite::rewrites(linear) {
+            let oracle = rewritten.oracle;
+            match rewritten.compare {
+                Compare::Rows(variant) => {
+                    let variant = Query::Linear(variant);
+                    if let Some(other) = self.rows(&variant)
+                        && !(if is_ordered { sequence(&other) == sequence(&rows) } else { multiset(&other) == multiset(&rows) })
+                    {
+                        return Some(failure(oracle, &variant, format!("{} rows, {} after the rewrite", rows.len(), other.len())));
+                    }
+                }
+                Compare::CountSum(parts) => {
+                    let Some(total) = *whole.get_or_insert_with(|| self.count(&counted(&linear.clauses))) else { continue };
+                    let counts: Option<Vec<f64>> = parts.iter().map(|part| self.count(&counted(&part.clauses))).collect();
+                    if let Some(counts) = counts
+                        && counts.iter().sum::<f64>() != total
+                    {
+                        let shown = counted(&parts.last().unwrap().clauses);
+                        let listed: Vec<String> = counts.iter().map(f64::to_string).collect();
+                        return Some(failure(oracle, &shown, format!("count(*) = {total}; by length {}", listed.join(" + "))));
+                    }
+                }
+                Compare::Count(variant) => {
+                    let Some(total) = *whole.get_or_insert_with(|| self.count(&counted(&linear.clauses))) else { continue };
+                    let variant = Query::Linear(variant);
+                    if let Some(other) = self.count(&variant)
+                        && other != total
+                    {
+                        return Some(failure(oracle, &variant, format!("count(*) = {total} with the filter, {other} counting where it holds")));
+                    }
+                }
+            }
+        }
         None
     }
 }
@@ -528,6 +621,11 @@ impl<'a> Checker<'a> {
                     && let Some(rows) = outcomes.first().and_then(Outcome::rows)
                 {
                     result.rows = Some(rows.len());
+                    // The reference checks itself too, unless it is the engine being judged (as in reduction).
+                    if slot.metamorphic && !targets.contains(&index) {
+                        let verdict = slot.metamorphic(generated, &rows.clone(), self.schema).unwrap_or(Verdict::SelfChecked);
+                        result.verdicts.insert(slot.name.clone(), verdict);
+                    }
                     // Not while reducing: only the verdict matters there.
                     if phase != "reduce"
                         && let Query::Linear(linear) = &generated.query
@@ -579,7 +677,12 @@ impl<'a> Checker<'a> {
         let Some(reference) = reference else {
             return Ok(match target_error {
                 Some(message) => Verdict::TargetOnlyError { kind: classify(&message), message },
-                None => outcomes.first().and_then(Outcome::rows).cloned().and_then(|rows| slot.metamorphic(generated, &rows)).unwrap_or(Verdict::TargetOnlyOk),
+                None => outcomes
+                    .first()
+                    .and_then(Outcome::rows)
+                    .cloned()
+                    .and_then(|rows| slot.metamorphic(generated, &rows, schema))
+                    .unwrap_or(Verdict::TargetOnlyOk),
             });
         };
         let reference_error = first_error(reference).map(String::from);
@@ -627,7 +730,8 @@ impl<'a> Checker<'a> {
                 if generated.mutation {
                     Verdict::Agree
                 } else {
-                    outcomes.first().and_then(Outcome::rows).cloned().and_then(|rows| slot.metamorphic(generated, &rows)).unwrap_or(Verdict::Agree)
+                    let slot = &mut self.slots[target];
+                    outcomes.first().and_then(Outcome::rows).cloned().and_then(|rows| slot.metamorphic(generated, &rows, schema)).unwrap_or(Verdict::Agree)
                 }
             }
         })

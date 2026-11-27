@@ -16,10 +16,12 @@ mod profile;
 mod reduce;
 mod render;
 mod report;
+mod rewrite;
 mod rng;
 mod schema;
 #[cfg(test)]
 mod tests;
+mod truth;
 mod value;
 mod worker;
 
@@ -247,7 +249,28 @@ fn connect_all(file: &FileConfig, config_path: &Path, schema: &Schema) -> Result
         let profile = Profile::load(&config.dialect, &base, &config.supported, &config.unsupported, config.syntax.as_ref())?;
         let mut engine = engine::connect(name, config, &base, timeout)?;
         engine.setup(schema, &undirected, file.seed, &profile)?;
-        slots.push(Slot { name: name.clone(), engine, profile, metamorphic: config.metamorphic, undirected_graph: config.connector == "duckgql" });
+        let different_edges = match config.match_mode.as_deref() {
+            None => profile.name != "gql",
+            Some("different_edges") => true,
+            Some("repeatable_elements") => false,
+            Some(other) => bail!("engine {name}: unknown match_mode '{other}' (different_edges, repeatable_elements)"),
+        };
+        // A variant whose settings the engine rejects would silently check nothing.
+        for (variant_name, variant) in &config.variants {
+            let probe = check::with_options(&format!("{}MATCH (n) RETURN count(*) AS c0", profile.prefix), &profile.prefix, &variant.options);
+            if let Outcome::Error(message) = engine.read_with(&variant.before, &probe, &variant.after)? {
+                bail!("engine {name}: variant {variant_name} fails: {message}");
+            }
+        }
+        slots.push(Slot {
+            name: name.clone(),
+            engine,
+            profile,
+            metamorphic: config.metamorphic && file.checks.metamorphic,
+            undirected_graph: config.connector == "duckgql",
+            variants: config.variants.clone().into_iter().collect(),
+            different_edges,
+        });
     }
     if slots.is_empty() {
         bail!("no engine is enabled");
@@ -388,7 +411,13 @@ fn run(config_path: &Path, seed: Option<u64>) -> Result<()> {
         undirected.describe(),
         file.raw
     );
-    let target_names: Vec<String> = targets.iter().map(|index| names[*index].clone()).collect();
+    let mut target_names: Vec<String> = targets.iter().map(|index| names[*index].clone()).collect();
+    // A reference that checks itself has its own section.
+    if let Some(index) = reference
+        && slots[index].metamorphic
+    {
+        target_names.push(names[index].clone());
+    }
     let reference_profile = reference.map(|index| (names[index].as_str(), &slots[index].profile));
     let markdown = report::markdown(&results, &header, &target_names, reference_profile);
     fs::write(file.out.join("report.md"), &markdown)?;

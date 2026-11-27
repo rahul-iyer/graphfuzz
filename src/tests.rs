@@ -192,3 +192,104 @@ fn random_schemas_are_valid_and_avoid_keywords() {
         assert!(!schema.values.is_empty());
     }
 }
+
+/// Three P nodes (1 has no age) and K edges 1->1 (a self-loop), 1->2, 2->3.
+fn tiny_graph() -> crate::truth::Graph {
+    use crate::schema::{Fixture, FixtureEdge, FixtureNode};
+    let node = |id: i64, age: Option<i64>| {
+        let mut props = vec![("id", Lit::Int(id))];
+        props.extend(age.map(|age| ("age", Lit::Int(age))));
+        FixtureNode { label: "P", props }
+    };
+    let edge = |from: i64, to: i64| FixtureEdge { label: "K", source: ("P", from), target: ("P", to), undirected: false, props: vec![] };
+    let fixture = Fixture { nodes: vec![node(1, None), node(2, Some(20)), node(3, Some(30))], edges: vec![edge(1, 1), edge(1, 2), edge(2, 3)] };
+    crate::truth::Graph::new(&fixture).unwrap()
+}
+
+fn clauses(query: Query) -> Vec<Clause> {
+    match query {
+        Query::Linear(linear) => linear.clauses,
+        _ => unreachable!(),
+    }
+}
+
+fn hop(dir: Dir, quant: Option<Quant>, to: NodePat) -> (EdgePat, NodePat) {
+    (EdgePat { var: None, label: Some(name("K")), dir, quant, props: vec![], filter: None }, to)
+}
+
+#[test]
+fn ground_truth_counts_bindings() {
+    let graph = tiny_graph();
+    let count = |paths: Vec<PathPat>, different: bool| graph.count(&clauses(counting(paths)), different);
+    let one = |dir| vec![path(node("a", None), vec![hop(dir, None, node("b", None))])];
+    assert_eq!(count(one(Dir::Right), true), Some(3));
+    assert_eq!(count(one(Dir::Left), true), Some(3));
+    // The self-loop is one binding either way; the other two edges are two each.
+    assert_eq!(count(one(Dir::Any), true), Some(5));
+    // A node variable used twice: only the self-loop.
+    assert_eq!(count(vec![path(node("a", None), vec![hop(Dir::Right, None, node("a", None))])], false), Some(1));
+    // Two hops: 1->1->1 uses the self-loop twice, which only REPEATABLE ELEMENTS allows.
+    let two = vec![path(node("a", None), vec![hop(Dir::Right, None, node("b", None)), hop(Dir::Right, None, node("c", None))])];
+    assert_eq!(count(two.clone(), false), Some(3));
+    assert_eq!(count(two, true), Some(2));
+    // K|K is K.
+    let or = LabelExpr::Or(Box::new(name("K")), Box::new(name("K")));
+    let mut doubled = one(Dir::Right);
+    doubled[0].hops[0].0.label = Some(or);
+    assert_eq!(count(doubled, true), Some(3));
+    // {1,2}: 3 walks of one edge and 3 of two, or 2 of two without repeating the self-loop.
+    let quantified = vec![path(node("a", None), vec![hop(Dir::Right, Some(Quant::Range(1, 2)), node("b", None))])];
+    assert_eq!(count(quantified.clone(), false), Some(6));
+    assert_eq!(count(quantified, true), Some(5));
+}
+
+#[test]
+fn ground_truth_handles_optional_match_and_nulls() {
+    let graph = tiny_graph();
+    // Each a with no K edge to node 3 is still one row.
+    let b_is_3 = Expr::Bin(BinOp::Eq, Box::new(Expr::Prop("b".to_string(), "id".to_string())), Box::new(Expr::Lit(Lit::Int(3))));
+    let optional = vec![
+        Clause::Match { optional: false, mode: None, paths: vec![path(node("a", Some(name("P"))), vec![])], filter: None },
+        Clause::Match { optional: true, mode: None, paths: vec![path(node("a", None), vec![hop(Dir::Right, None, node("b", None))])], filter: Some(b_is_3) },
+    ];
+    assert_eq!(graph.count(&optional, true), Some(3));
+    // Node 1 has no age: age > 10 is unknown there, so NOT (age > 10) keeps nothing more.
+    let older = Expr::Bin(BinOp::Gt, Box::new(Expr::Prop("a".to_string(), "age".to_string())), Box::new(Expr::Lit(Lit::Int(10))));
+    let filtered = |condition: Expr| vec![Clause::Match { optional: false, mode: None, paths: vec![path(node("a", None), vec![])], filter: Some(condition) }];
+    assert_eq!(graph.count(&filtered(older.clone()), true), Some(2));
+    assert_eq!(graph.count(&filtered(Expr::Not(Box::new(older))), true), Some(0));
+    assert_eq!(graph.count(&filtered(Expr::IsNull(Box::new(Expr::Prop("a".to_string(), "age".to_string())), false)), true), Some(1));
+    // A function it does not model: not counted.
+    assert_eq!(graph.count(&filtered(Expr::Func("abs".to_string(), vec![Expr::Lit(Lit::Int(1))])), true), None);
+}
+
+#[test]
+fn pattern_rewrites_keep_the_pattern() {
+    let two = |quant| {
+        let query = counting(vec![path(node("a", None), vec![hop(Dir::Right, None, node("b", None)), hop(Dir::Right, quant, node("c", None))])]);
+        match query {
+            Query::Linear(linear) => linear,
+            _ => unreachable!(),
+        }
+    };
+    let split = crate::rewrite::split_path(&two(None)).unwrap();
+    assert_eq!(render::gql(&Query::Linear(split)), "MATCH (a)-[:K]->(b), (b)-[:K]->(c) RETURN count(*) AS c0");
+    let parts = crate::rewrite::unroll(&two(Some(Quant::Range(1, 3)))).unwrap();
+    let texts: Vec<String> = parts.into_iter().map(|part| render::gql(&Query::Linear(part))).collect();
+    assert_eq!(texts[0], "MATCH (a)-[:K]->(b)-[:K]->{1}(c) RETURN count(*) AS c0");
+    assert_eq!(texts.len(), 3);
+    let redundant = crate::rewrite::redundant_node(&two(None)).unwrap();
+    assert!(render::gql(&Query::Linear(redundant)).starts_with("MATCH (a)-[:K]->(b)-[:K]->(c), (a) "));
+
+    let mut filtered = two(None);
+    if let Clause::Match { paths, .. } = &mut filtered.clauses[0] {
+        paths[0].start.props.push(("age".to_string(), Expr::Lit(Lit::Int(20))));
+    }
+    let inlined = crate::rewrite::inline_filter(&filtered).unwrap();
+    assert_eq!(render::gql(&Query::Linear(inlined)), "MATCH (a)-[:K]->(b)-[:K]->(c) WHERE (a.age = 20) RETURN count(*) AS c0");
+    if let Clause::Match { filter, .. } = &mut filtered.clauses[0] {
+        *filter = Some(Expr::Bin(BinOp::Gt, Box::new(Expr::Prop("c".to_string(), "age".to_string())), Box::new(Expr::Lit(Lit::Int(1)))));
+    }
+    let norec = crate::rewrite::norec(&filtered).unwrap();
+    assert_eq!(render::gql(&Query::Linear(norec)), "MATCH (a {age: 20})-[:K]->(b)-[:K]->(c) RETURN count(CASE WHEN (c.age > 1) THEN 1 END) AS c0");
+}

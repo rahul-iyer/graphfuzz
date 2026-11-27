@@ -16,7 +16,7 @@ and [Ladybug](https://github.com/LadybugDB/ladybug). See [Bugs found](#bugs-foun
   typed AST ──► render ──► GQL ─────────► DuckGQL ─┐
      │                 ├──► openCypher ──► Ladybug ─┼──► compare ──► reduce ──► report.md
      │                 └──► Cypher 25 ──► Neo4j ───┘   (reference)
-     └──► metamorphic rewrites (TLP, count(*), DISTINCT, path reversal, A|A ≡ A)
+     └──► self-checks on every engine: ground truth, planner variants, equivalent patterns, TLP, NoREC
 ```
 
 ## Quickstart
@@ -61,6 +61,7 @@ To reproduce these counts, run `graphfuzz repro --seed 1` on the declared schema
 | Neo4j 2026.10.2 | `MATCH (a)-[:LOCATED_IN\|LOCATED_IN]->(b) RETURN count(*)` | 16 | 8, as `-[:LOCATED_IN]->` (see [neo4j#14041](https://github.com/neo4j/neo4j/issues/14041)) |
 | DuckGQL | `MATCH (a)-[:KNOWS\|KNOWS]->(b) RETURN count(*)` | 40 | 20, as `-[:KNOWS]->` |
 | DuckGQL | `MATCH (a:Person)-[:KNOWS]->(a) RETURN count(*)` (`--seed 11`, random schema) | 30, every KNOWS edge | 2, the edges from a node to itself |
+| DuckGQL | `MATCH (x)<-[]-(m)-[]->(y) RETURN count(*)` (`--seed 7`, random schema) | 540: no edge used twice | 661, as `(x)<-[]-(m), (m)-[]->(y)` returns: GQL's default REPEATABLE ELEMENTS lets one path use an edge twice |
 | DuckGQL | `MATCH (n) ORDER BY n.id LIMIT 6 RETURN sum(n.id - n.population)` | 6 rows | 1 row (-74, as Neo4j) |
 | Ladybug (`lbug` 0.22.3) | `RETURN count(DISTINCT NULL)` | assertion failure, `UNREACHABLE_CODE` in `types.cpp` | 0 |
 | Ladybug (`lbug` 0.22.3) | `MATCH (n:Company) RETURN count(NULL)` | "Trying to a create a vector with ANY type" | 0 |
@@ -89,9 +90,22 @@ a mismatch, it re-runs the query on Neo4j with `MATCH REPEATABLE ELEMENTS`.
   `seed: random` picks a new seed every run. `--seed N` on `run`, `repro` or `generate` repeats a run exactly.
 - **Oracles:**
   - **Differential:** each engine under test against the reference, each on its own share of queries.
-  - **Metamorphic:** rewrites that must not change an answer: partitioning a filter three ways (TLP),
-    `count(*)`, `DISTINCT`, path reversal, and `:A|A ≡ :A`. They also cover queries the reference cannot
-    express.
+  - **Ground truth:** graphfuzz wrote the data, so for queries built from MATCH, OPTIONAL MATCH, label
+    expressions, property maps, WHERE, bounded quantifiers and path modes, it counts the right number of
+    bindings itself, under each engine's match mode. This catches a bug that Neo4j shares with the engine
+    under test.
+  - **Planner and runtime variants:** each query also runs under other settings of the same engine:
+    Neo4j's `planner=dp`, `expressionEngine=compiled` and `inferSchemaParts=off`, and DuckDB with its
+    optimizer off or on one thread. The same engine on the same text must give the same answer.
+  - **Equivalent patterns** (after GraphGenie and GRev): splitting a path into two that share a node,
+    unrolling `{1,3}` into one query per length, moving a property map or an element's WHERE into the MATCH's
+    WHERE, adding a redundant node pattern, path reversal, and `:A|A ≡ :A`.
+  - **Filter oracles:** partitioning a filter three ways (TLP), and NoREC, which compares
+    `WHERE p ... count(*)` with `count(CASE WHEN p THEN 1 END)` that no optimizer can push down. Also
+    `count(*)` against the row count, and `DISTINCT`.
+
+  These run on every engine with `metamorphic: true`, including Neo4j, which then gets its own section in
+  the report. They also cover queries the reference can't express.
 - **Reduction.** A greedy AST reducer shrinks each failure. It keeps a reduction only if the mismatch has the
   same shape: the same side is empty, and the two row counts compare the same way. This keeps a reduction from
   sliding onto a different bug.

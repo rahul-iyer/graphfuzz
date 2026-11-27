@@ -58,12 +58,25 @@ engines:
     password: graphfuzz123
     # Loading the fixture deletes everything in the database.
     allow_wipe: true
+    # The reference checks itself too: ground truth, planner settings, and the rewrites below. A bug Neo4j
+    # shares with the engine under test is invisible to comparison alone.
+    metamorphic: true
+    # Each query also runs under these options (after CYPHER 25); any different answer is a bug. Community
+    # edition has one runtime (slotted), so these vary the planner and expression evaluation.
+    variants:
+      dp_planner: {options: "planner=dp"}
+      compiled_expressions: {options: "expressionEngine=compiled"}
+      no_inferred_schema: {options: "inferSchemaParts=off"}
 
   duckgql:
     connector: duckgql          # the DuckGQL libduckdb that .cargo/config.toml links
     dialect: gql
     # Also check answers against rewrites that must not change them.
     metamorphic: true
+    # Each query also runs with DuckDB's optimizer off, and on one thread.
+    variants:
+      no_optimizer: {before: ["PRAGMA disable_optimizer"], after: ["PRAGMA enable_optimizer"]}
+      one_thread: {before: ["SET threads = 1"], after: ["RESET threads"]}
 
   # Optional: Ladybug against Neo4j. Build with --features ladybug and set enabled: true.
   ladybug:
@@ -72,6 +85,8 @@ engines:
     dialect: opencypher
     path: runs/ladybug.lbdb     # recreated at the start of every run
     supported: [label_or, exists_match]
+    # Ladybug's MATCH may use one edge twice, like GQL's default; the ground-truth oracle counts that way.
+    match_mode: repeatable_elements
     # Ladybug has no REMOVE and no EXP, LN or LOG10. Its * and + walk paths that may repeat edges, up to an
     # implementation-defined depth, where Neo4j's never repeat a relationship, so unbounded quantifiers are
     # not comparable; bounded ones are, and differences there are named as match_mode.
@@ -124,7 +139,10 @@ generator:
   #   - return_star
 
 checks:
-  # Rewrites that must not change an answer: partitioning a filter, reversing paths, count(*), DISTINCT.
+  # On engines with `metamorphic: true`: the answer counted from the fixture itself (ground truth), the
+  # engine's `variants`, and rewrites that must not change an answer: partitioning a filter, count(*),
+  # DISTINCT, A|A as A, reversing, splitting and unrolling paths, moving property maps into WHERE, a
+  # redundant node pattern, and NoREC's count of where a filter holds.
   metamorphic: true
   # Shrink one failing case per failure group to a minimal query.
   reduce: true

@@ -55,6 +55,13 @@ pub trait Engine {
     /// `undirected` is the schema with undirected edge types, for an engine that also holds that graph.
     fn setup(&mut self, schema: &Schema, undirected: &Schema, seed: u64, profile: &Profile) -> Result<()>;
     fn read(&mut self, query: &str) -> Result<Outcome>;
+    /// Reads with settings: `before` runs first in the same session, and `after` restores the defaults.
+    fn read_with(&mut self, before: &[String], query: &str, after: &[String]) -> Result<Outcome> {
+        if !before.is_empty() || !after.is_empty() {
+            bail!("this connector takes no setting statements; give the variant `options` instead");
+        }
+        self.read(query)
+    }
     /// Whether data modification can run in a transaction that is rolled back.
     fn transactional(&self) -> bool;
     /// Runs a data modification and then the digest queries in one transaction, and rolls it back.
@@ -90,6 +97,14 @@ pub struct EngineConfig {
     /// Check the engine against itself with rewrites that must not change an answer.
     #[serde(default)]
     pub metamorphic: bool,
+    /// Planner and runtime settings each query is also run under; any difference from the default answer is
+    /// a bug. Checked with `metamorphic`.
+    #[serde(default)]
+    pub variants: BTreeMap<String, Variant>,
+    /// Whether a MATCH that names no match mode may use one edge twice: `different_edges` (Cypher's
+    /// relationship uniqueness) or `repeatable_elements` (GQL's default). By default, from the dialect.
+    #[serde(default)]
+    pub match_mode: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
     #[serde(default)]
@@ -105,6 +120,21 @@ pub struct EngineConfig {
     /// Loading the fixture deletes everything in a remote database; it must be allowed explicitly.
     #[serde(default)]
     pub allow_wipe: bool,
+}
+
+/// One planner or runtime setting to run queries under.
+#[derive(Deserialize, Debug, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Variant {
+    /// Text after the dialect's prefix, as `planner=dp` after Neo4j's `CYPHER 25`.
+    #[serde(default)]
+    pub options: String,
+    /// Statements run before the query in the same session, as `PRAGMA disable_optimizer`.
+    #[serde(default)]
+    pub before: Vec<String>,
+    /// Statements run after it, to restore the defaults.
+    #[serde(default)]
+    pub after: Vec<String>,
 }
 
 fn enabled() -> bool {
@@ -158,6 +188,18 @@ fn worker_outcomes(outcome: RunOutcome, count: usize) -> Vec<Outcome> {
         RunOutcome::Crash(detail) => vec![Outcome::Crash(detail); count],
         RunOutcome::Timeout => vec![Outcome::Timeout; count],
     }
+}
+
+/// The query's outcome among a variant's statements; a setting that fails is a configuration error.
+fn setting_outcome(outcomes: Vec<Outcome>, query: usize) -> Result<Outcome> {
+    for (index, outcome) in outcomes.iter().enumerate() {
+        if index != query
+            && let Outcome::Error(message) = outcome
+        {
+            bail!("a variant's setting statement failed: {message}");
+        }
+    }
+    Ok(outcomes[query].clone())
 }
 
 // ------------------------------------------------------------------------- DuckGQL
@@ -214,6 +256,14 @@ impl Engine for DuckGql {
         let statements = vec![Statement { sql: format!("SESSION SET GRAPH {}", self.graph), read: false }, Statement { sql: query.to_string(), read: true }];
         let outcomes = worker_outcomes(self.worker.as_mut().unwrap().run(&statements)?, 2);
         Ok(outcomes[1].clone())
+    }
+
+    fn read_with(&mut self, before: &[String], query: &str, after: &[String]) -> Result<Outcome> {
+        let mut statements = vec![Statement { sql: format!("SESSION SET GRAPH {}", self.graph), read: false }];
+        statements.extend(before.iter().map(|sql| Statement { sql: sql.clone(), read: false }));
+        statements.push(Statement { sql: query.to_string(), read: true });
+        statements.extend(after.iter().map(|sql| Statement { sql: sql.clone(), read: false }));
+        setting_outcome(worker_outcomes(self.worker.as_mut().unwrap().run(&statements)?, statements.len()), before.len() + 1)
     }
 
     fn transactional(&self) -> bool {
@@ -296,6 +346,13 @@ impl Engine for Ladybug {
     fn read(&mut self, query: &str) -> Result<Outcome> {
         let statements = vec![Statement { sql: query.to_string(), read: true }];
         Ok(worker_outcomes(self.worker.as_mut().unwrap().run(&statements)?, 1).remove(0))
+    }
+
+    fn read_with(&mut self, before: &[String], query: &str, after: &[String]) -> Result<Outcome> {
+        let mut statements: Vec<Statement> = before.iter().map(|sql| Statement { sql: sql.clone(), read: false }).collect();
+        statements.push(Statement { sql: query.to_string(), read: true });
+        statements.extend(after.iter().map(|sql| Statement { sql: sql.clone(), read: false }));
+        setting_outcome(worker_outcomes(self.worker.as_mut().unwrap().run(&statements)?, statements.len()), before.len())
     }
 
     fn transactional(&self) -> bool {

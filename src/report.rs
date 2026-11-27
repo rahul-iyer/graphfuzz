@@ -89,7 +89,7 @@ pub fn markdown(cases: &[CaseResult], header: &str, engines: &[String], referenc
     }
     let _ = writeln!(
         out,
-        "\n`agree`: same rows as the reference. `rejects`: an error where the reference answered. `unchecked_*`: the reference cannot express the case. `unsupported`: the engine's dialect cannot. `match_mode`: differs from the reference only in whether one MATCH may reuse an edge."
+        "\n`agree`: same rows as the reference. `rejects`: an error where the reference answered. `unchecked_*`: the reference cannot express the case. `unsupported`: the engine's dialect cannot. `match_mode`: differs from the reference only in whether one MATCH may reuse an edge. `self_checked`: the reference passed its own checks."
     );
 
     // Whether queries reach the data: a query whose patterns bind nothing tests little beyond its parser.
@@ -143,7 +143,8 @@ pub fn markdown(cases: &[CaseResult], header: &str, engines: &[String], referenc
         let cells: Vec<String> = engines
             .iter()
             .map(|engine| {
-                let good = using.iter().filter(|case| matches!(verdict(case, engine), Some(Verdict::Agree | Verdict::TargetOnlyOk))).count();
+                let good =
+                    using.iter().filter(|case| matches!(verdict(case, engine), Some(Verdict::Agree | Verdict::TargetOnlyOk | Verdict::SelfChecked))).count();
                 let bad = using.iter().filter(|case| wrong(case, engine)).count();
                 let errors = using.iter().filter(|case| failure_message(case, engine).is_some()).count();
                 let unsupported = using.iter().filter(|case| matches!(verdict(case, engine), Some(Verdict::Unsupported(_)))).count();

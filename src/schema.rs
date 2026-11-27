@@ -103,6 +103,8 @@ pub struct Schema {
     /// The values the fixture holds, by element label and property, so generated filters compare with data
     /// that exists; empty until `with_values`.
     pub values: BTreeMap<(&'static str, &'static str), Vec<Lit>>,
+    /// The fixture as a graph, for the ground-truth oracle; None until `with_values`, or with undirected edges.
+    pub graph: Option<crate::truth::Graph>,
 }
 
 /// The `schema:` section of config.yml. A property type is written as `INT64` or `INT64 NOT NULL`.
@@ -257,7 +259,7 @@ edges:
                 bail!("property {} has two types, {} and {}; give each name one type", prop.name, ty.gql_name(), prop.ty.gql_name());
             }
         }
-        Ok(Schema { nodes, edges, values: BTreeMap::new() })
+        Ok(Schema { nodes, edges, values: BTreeMap::new(), graph: None })
     }
 
     /// The declared schema with random node types, edge types, and properties added, and every type's count and
@@ -359,6 +361,7 @@ impl Schema {
             }
         }
         self.values = values;
+        self.graph = crate::truth::Graph::new(&fixture);
         self
     }
 
